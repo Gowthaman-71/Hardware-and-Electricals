@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: hardware-and-electricals
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: npm run start:api
+    envVars:
+      - key: NODE_VERSION
+        value: 24.14.1
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: DATABASE_PATH
+        value: server/data/catalog.sqlite
+      - key: UPLOAD_DIR
+        value: server/uploads
