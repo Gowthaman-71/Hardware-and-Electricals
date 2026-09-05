@@ -133,6 +133,8 @@
 	.profile-form input, .customer-form input, .customer-form select, .customer-form textarea { min-height: 46px; max-width: 100%; }
 	footer { grid-template-columns: 1fr; gap: 22px; padding: 32px 16px; }
 	footer > * { min-width: 0; }
+	footer .logo-lockup, footer .logo-name { min-width: 0; }
+	footer .logo-name { overflow-wrap: anywhere; }
 	.admin-mode .admin-header { overflow: hidden; }
 	.admin-mode .admin-content { width: 100%; overflow: hidden; }
 	.admin-mode .admin-topline { width: 100%; }
