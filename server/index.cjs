@@ -60,14 +60,18 @@ const mapAttribute = (row) => ({ ...row, categoryId: row.category_id, options: s
 const mapProduct = (row) => ({ ...row, categoryId: row.category_id, code: row.sku, category: row.category_name, brand: row.brand_name || '', image: row.image_url || '', attributes: safeJson(row.attributes_json, {}), status: row.status === 'ACTIVE' ? 'Active' : 'Inactive' });
 const productSelect = `SELECT p.*, c.name category_name, b.name brand_name FROM products p JOIN categories c ON c.id = p.category_id LEFT JOIN brands b ON b.id = p.brand_id`;
 function seed() {
-  const adminEmail = process.env.ADMIN_EMAIL || 'owner@murugesan.in';
+  const adminEmail = String(process.env.ADMIN_EMAIL || 'owner@murugesan.in').trim().toLowerCase();
   const configuredPassword = process.env.ADMIN_PASSWORD || 'change-this-before-production';
-  const existingAdmin = db.prepare('SELECT id FROM users WHERE email = ?').get(adminEmail);
+  let existingAdmin = db.prepare('SELECT id FROM users WHERE email = ? AND role = ?').get(adminEmail, 'ADMIN');
+  if (!existingAdmin) {
+    existingAdmin = db.prepare("SELECT id FROM users WHERE role = 'ADMIN' ORDER BY id LIMIT 1").get();
+    if (existingAdmin) db.prepare("UPDATE users SET email = ?, updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(adminEmail, now(), existingAdmin.id);
+  }
   if (!existingAdmin) {
     const timestamp = now();
     db.prepare('INSERT INTO users (name,email,password_hash,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').run('Store Owner', adminEmail, bcrypt.hashSync(configuredPassword, 12), 'ADMIN', 'ACTIVE', timestamp, timestamp);
-  } else if (process.env.ADMIN_PASSWORD) {
-    db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?').run(bcrypt.hashSync(configuredPassword, 12), now(), existingAdmin.id);
+  } else {
+    db.prepare("UPDATE users SET email = ?, password_hash = ?, status = 'ACTIVE', updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(adminEmail, bcrypt.hashSync(configuredPassword, 12), now(), existingAdmin.id);
   }
   if (db.prepare('SELECT COUNT(*) count FROM categories').get().count > 0) return;
   const categoryNames = ['Electrical Switches', 'Sockets', 'Wires & Cables', 'Lighting', 'Fan Regulators', 'Electrical Accessories', 'Tools', 'Hardware', 'Plumbing Accessories', 'Other Products'];
