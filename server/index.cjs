@@ -19,10 +19,33 @@ for (const envFile of ['.env', '.env.example']) {
 }
 const port = Number(process.env.PORT || 8787);
 const jwtSecret = process.env.JWT_SECRET || 'development-only-change-me';
-const databasePath = path.resolve(root, process.env.DATABASE_PATH || 'server/data/catalog.sqlite');
-const uploadDirectory = path.resolve(root, process.env.UPLOAD_DIR || 'server/uploads');
-fs.mkdirSync(path.dirname(databasePath), { recursive: true });
-fs.mkdirSync(uploadDirectory, { recursive: true });
+let databasePath = path.resolve(root, process.env.DATABASE_PATH || 'server/data/catalog.sqlite');
+let uploadDirectory = path.resolve(root, process.env.UPLOAD_DIR || 'server/uploads');
+
+// Handle permission issues on Render or other environments
+try {
+  fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+} catch (err) {
+  if (err.code === 'EACCES') {
+    // Fallback to project directory if /var/data is not writable
+    databasePath = path.resolve(root, '.data/catalog.sqlite');
+    fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+  } else {
+    throw err;
+  }
+}
+
+try {
+  fs.mkdirSync(uploadDirectory, { recursive: true });
+} catch (err) {
+  if (err.code === 'EACCES') {
+    // Fallback to project directory if /var/data is not writable
+    uploadDirectory = path.resolve(root, '.data/uploads');
+    fs.mkdirSync(uploadDirectory, { recursive: true });
+  } else {
+    throw err;
+  }
+}
 const db = new DatabaseSync(databasePath);
 db.exec(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
 const now = () => new Date().toISOString();
