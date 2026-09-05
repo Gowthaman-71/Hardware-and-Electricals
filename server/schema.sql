@@ -11,6 +11,40 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS addresses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  type TEXT NOT NULL DEFAULT 'Home' CHECK (type IN ('Home', 'Office', 'Other')),
+  full_name TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  address_line1 TEXT NOT NULL,
+  address_line2 TEXT NOT NULL DEFAULT '',
+  area TEXT NOT NULL DEFAULT '',
+  city TEXT NOT NULL,
+  state TEXT NOT NULL,
+  pincode TEXT NOT NULL,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_addresses_customer ON addresses(customer_id, is_default DESC, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  items_json TEXT NOT NULL DEFAULT '[]',
+  subtotal REAL NOT NULL DEFAULT 0,
+  total REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'PROCESSING',
+  payment_status TEXT NOT NULL DEFAULT 'PENDING',
+  customer_name TEXT NOT NULL,
+  customer_phone TEXT NOT NULL,
+  delivery_address_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_orders_customer_created ON orders(customer_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS categories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
