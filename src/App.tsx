@@ -719,7 +719,7 @@ async function loadCatalog(): Promise<{
   products: Product[];
   categories: Category[];
 }> {
-  const response = await fetch("/api/catalog");
+  const response = await fetch("/api/catalog", { cache: "no-store" });
   if (!response.ok) throw new Error("Unable to load catalog");
   return response.json();
 }
@@ -815,17 +815,36 @@ function App() {
   const [catalogError, setCatalogError] = useState("");
   const [toast, setToast] = useState("");
   useEffect(() => {
-    loadCatalog()
-      .then((catalog) => {
-        setProducts(catalog.products);
-        setCategories(catalog.categories);
-        setCatalogError("");
-      })
-      .catch(() =>
-        setCatalogError(
-          "Unable to load the live catalog. Showing sample data.",
-        ),
-      );
+    let mounted = true;
+    const refreshCatalog = () => {
+      loadCatalog()
+        .then((catalog) => {
+          if (!mounted) return;
+          setProducts(catalog.products);
+          setCategories(catalog.categories);
+          setCatalogError("");
+        })
+        .catch(() => {
+          if (mounted) {
+            setCatalogError(
+              "Unable to load the live catalog. Showing sample data.",
+            );
+          }
+        });
+    };
+    refreshCatalog();
+    const interval = window.setInterval(refreshCatalog, 5000);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refreshCatalog();
+    };
+    window.addEventListener("focus", refreshCatalog);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      mounted = false;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshCatalog);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
   }, []);
   const notify = (message: string) => {
     setToast(message);
