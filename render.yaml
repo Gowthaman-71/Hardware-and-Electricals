@@ -17,6 +17,12 @@ services:
         value: 9361866771
       - key: OTP_WEBHOOK_URL
         sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER
+        sync: false
       - key: DATABASE_PATH
         value: /var/data/catalog.sqlite
       - key: UPLOAD_DIR
