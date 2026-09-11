@@ -724,16 +724,32 @@ async function loadCatalog(): Promise<{
   return response.json();
 }
 async function loginRequest(
-  email: string,
+  mobile: string,
   password: string,
 ): Promise<{ token: string }> {
   const response = await fetch("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
+    body: JSON.stringify({ mobile: mobile.replace(/\D/g, ""), password }),
   });
   if (!response.ok) throw new Error("Invalid email or password");
   return response.json();
+}
+async function saveProductRequest(
+  token: string,
+  product: Product,
+  categories: Category[],
+): Promise<Product> {
+  const categoryId = product.categoryId || categories.find((item) => item.name === product.category)?.id;
+  if (!product.code.trim() || !product.name.trim() || !categoryId) throw new Error("Product code, name and category are required");
+  const response = await fetch(product.id ? `/api/products/${product.id}` : "/api/products", {
+    method: product.id ? "PATCH" : "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ sku: product.code.trim(), name: product.name.trim(), categoryId, brand: product.brand, description: product.description, details: product.details, price: product.price, mrp: product.mrp || product.price, stock: product.stock, unit: product.unit, imageUrl: product.image || null, attributes: product.attributes || {}, status: product.status === "Inactive" ? "INACTIVE" : "ACTIVE" }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || "Unable to save product");
+  return result as Product;
 }
 function Logo({ compact = false }: { compact?: boolean }) {
   const [failed, setFailed] = useState(false);
@@ -788,14 +804,18 @@ function App() {
   });
   const [products, setProducts] = useState<Product[]>(productsSeed);
   const [categories, setCategories] = useState<Category[]>(categoriesSeed);
-  const [screen, setScreen] = useState<Screen>("home");
+  const [screen, setScreenState] = useState<Screen>("home");
   const [adminView, setAdminView] = useState("Dashboard");
   const [selected, setSelected] = useState<Product | null>(null);
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("All");
-  const [cart, setCart] = useState<{ product: Product; quantity: number }[]>(
-    [],
-  );
+  const [cart, setCart] = useState<{ product: Product; quantity: number }[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("murugesan-cart") || "[]");
+    } catch {
+      return [];
+    }
+  });
   const [editing, setEditing] = useState<Product | null>(null);
   const [authToken, setAuthToken] = useState(() => {
     try {
@@ -814,6 +834,19 @@ function App() {
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [catalogError, setCatalogError] = useState("");
   const [toast, setToast] = useState("");
+  const setScreen = (next: Screen) => {
+    setScreenState(next);
+    window.history.pushState({ screen: next }, "", window.location.pathname);
+  };
+  useEffect(() => {
+    const handleBack = () => setScreenState(window.history.state?.screen || "home");
+    window.history.replaceState({ screen: "home" }, "", window.location.pathname);
+    window.addEventListener("popstate", handleBack);
+    return () => window.removeEventListener("popstate", handleBack);
+  }, []);
+  useEffect(() => {
+    localStorage.setItem("murugesan-cart", JSON.stringify(cart));
+  }, [cart]);
   useEffect(() => {
     let mounted = true;
     const refreshCatalog = () => {
@@ -1005,8 +1038,8 @@ function App() {
       )}
       {screen === "login" && (
         <Login
-          onLogin={async (email, password) => {
-            const result = await loginRequest(email, password);
+          onLogin={async (mobile, password) => {
+            const result = await loginRequest(mobile, password);
             setAuthToken(result.token);
             sessionStorage.setItem("murugesan-auth-token", result.token);
             setScreen("admin");
@@ -1747,8 +1780,9 @@ function whatsapp(product: Product) {
 function Login({
   onLogin,
 }: {
-  onLogin: (email: string, password: string) => Promise<void>;
+  onLogin: (mobile: string, password: string) => Promise<void>;
 }) {
+  const [mobile, setMobile] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
@@ -1869,7 +1903,7 @@ function Login({
             onSubmit={(e) => {
               e.preventDefault();
               setError("");
-              onLogin(email, password).catch((reason: unknown) =>
+              onLogin(mobile, password).catch((reason: unknown) =>
                 setError(
                   reason instanceof Error
                     ? reason.message
@@ -1879,12 +1913,14 @@ function Login({
             }}
           >
             <label>
-              Email or username
+              Mobile number
               <input
                 autoFocus
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="owner@murugesan.in"
+                value={mobile}
+                onChange={(e) => setMobile(e.target.value)}
+                placeholder="+91 93618 67771"
+                inputMode="tel"
+                pattern="(?:\+?91\s*)?[6-9]\d{9}"
                 required
               />
             </label>
@@ -2080,7 +2116,7 @@ function BulkProductImport({
     setItems(nextItems);
     setErrors(nextErrors);
   };
-  const importProducts = () => {
+  const importProducts = async () => {
     if (errors.length || !items.length) return;
     if (
       !window.confirm(
@@ -2088,23 +2124,25 @@ function BulkProductImport({
       )
     )
       return;
+    const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
     const next = [...products];
-    items.forEach(({ product }) => {
-      const existing = next.findIndex(
+    try {
+      for (const { product } of items) {
+        const existing = next.findIndex(
         (item) => item.code.toLowerCase() === product.code.toLowerCase(),
-      );
-      if (existing >= 0 && duplicateMode === "update")
-        next[existing] = {
-          ...next[existing],
-          ...product,
-          id: next[existing].id,
-        };
-      else if (existing < 0) next.push(product);
-    });
-    setProducts(next);
-    notify(`${items.length} products imported successfully`);
-    setItems([]);
-    setErrors([]);
+        );
+        if (existing >= 0 && duplicateMode === "skip") continue;
+        const saved = await saveProductRequest(apiToken, existing >= 0 ? { ...next[existing], ...product, id: next[existing].id } : { ...product, id: 0 }, categories);
+        if (existing >= 0) next[existing] = saved;
+        else next.unshift(saved);
+        setProducts([...next]);
+      }
+      notify(`${items.length} products imported successfully`);
+      setItems([]);
+      setErrors([]);
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "Unable to import products. Please try again.");
+    }
   };
   const downloadErrors = () => {
     const sheet = XLSX.utils.json_to_sheet(
@@ -2259,6 +2297,7 @@ function Admin({
   onStore: () => void;
   onLogout: () => void;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
   return (
     <>
       <header className="admin-header">
@@ -2272,9 +2311,13 @@ function Admin({
         <button className="store-link" onClick={onStore}>
           View customer store ↗
         </button>
+        <button className="admin-menu-button" type="button" aria-label="Open dashboard menu" onClick={() => setMenuOpen(!menuOpen)}>
+          {menuOpen ? "×" : "☰"}
+        </button>
       </header>
+      {menuOpen && <button className="admin-drawer-backdrop" aria-label="Close dashboard menu" onClick={() => setMenuOpen(false)} />}
       <main className="admin-layout">
-        <aside className="sidebar">
+        <aside className={`sidebar${menuOpen ? " open" : ""}`}>
           <p className="eyebrow">MAIN MENU</p>
           {[
             "Dashboard",
@@ -2289,13 +2332,13 @@ function Admin({
             <button
               className={view === item ? "active" : ""}
               key={item}
-              onClick={() => setView(item)}
+              onClick={() => { setView(item); setMenuOpen(false); }}
             >
               {item === "Orders / Enquiries" && <b>3</b>}
               {item}
             </button>
           ))}
-          <button className="logout" onClick={onLogout}>
+          <button className="logout" onClick={() => { setMenuOpen(false); onLogout(); }}>
             Log out
           </button>
           <small>Logged in as Murugasan</small>
@@ -2472,6 +2515,7 @@ function AdminProducts({
   notify: (message: string) => void;
   inventory: boolean;
 }) {
+  const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("All");
   const [status, setStatus] = useState("All");
@@ -2483,25 +2527,34 @@ function AdminProducts({
       (category === "All" || p.category === category) &&
       (status === "All" || statusOf(p.stock) === status),
   );
-  const save = (product: Product) => {
-    setProducts(
-      product.id
-        ? products.map((item) => (item.id === product.id ? product : item))
-        : [...products, { ...product, id: Date.now() }],
-    );
-    setEditing(null);
-    notify(
-      product.id
-        ? "Product updated successfully"
-        : "Product added successfully",
-    );
+  const save = async (product: Product) => {
+    try {
+      const saved = await saveProductRequest(apiToken, product, categories);
+      setProducts(
+        product.id
+          ? products.map((item) => (item.id === saved.id ? saved : item))
+          : [saved, ...products],
+      );
+      setEditing(null);
+      notify(product.id ? "Product updated successfully" : "Product added successfully");
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "Unable to save product. Please try again.");
+    }
   };
-  const remove = (id: number) => {
+  const remove = async (id: number) => {
     if (
       window.confirm(
         "Delete Product?\n\nAre you sure you want to delete this product? This action cannot be undone.",
       )
     ) {
+      const response = await fetch(`/api/products/${id}/archive`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${apiToken}` },
+      });
+      if (!response.ok) {
+        notify("Unable to delete product. Please try again.");
+        return;
+      }
       setProducts(products.filter((p) => p.id !== id));
       notify("Product deleted");
     }
@@ -2586,15 +2639,16 @@ function AdminProducts({
                 type="number"
                 min="0"
                 value={p.stock}
-                onChange={(e) =>
-                  setProducts(
-                    products.map((item) =>
-                      item.id === p.id
-                        ? { ...item, stock: Number(e.target.value) }
-                        : item,
-                    ),
-                  )
-                }
+                onChange={(e) => setProducts(products.map((item) => item.id === p.id ? { ...item, stock: Number(e.target.value) } : item))}
+                onBlur={(e) => {
+                  const stock = Number(e.target.value);
+                  void saveProductRequest(apiToken, { ...p, stock }, categories)
+                    .then((saved) => setProducts(products.map((item) => item.id === saved.id ? saved : item)))
+                    .catch(() => {
+                      setProducts(products);
+                      notify("Unable to update stock. Please try again.");
+                    });
+                }}
               />{" "}
               {p.unit}
             </span>
@@ -2647,6 +2701,7 @@ function ProductForm({
 }) {
   const [form, setForm] = useState(product);
   const [advanced, setAdvanced] = useState(false);
+  const [saving, setSaving] = useState(false);
   const update = (key: keyof Product, value: string | number) =>
     setForm({ ...form, [key]: value });
   const upload = (file?: File) => {
@@ -2661,8 +2716,10 @@ function ProductForm({
         className="product-form"
         onSubmit={(e) => {
           e.preventDefault();
-          if (form.name.trim() && form.price > 0)
-            onSave({ ...form, image: form.image || fallbackImage });
+          if (form.name.trim() && form.code.trim() && form.price > 0) {
+            setSaving(true);
+            Promise.resolve(onSave({ ...form, image: form.image || fallbackImage })).finally(() => setSaving(false));
+          }
         }}
       >
         <div className="form-heading">
@@ -2699,7 +2756,7 @@ function ProductForm({
             />
           </label>
           <label>
-            Product Code
+            Product Code *
             <input
               value={form.code}
               onChange={(e) => update("code", e.target.value)}
@@ -2797,8 +2854,8 @@ function ProductForm({
           <button type="button" className="text-button" onClick={onClose}>
             Cancel
           </button>
-          <button className="button blue" type="submit">
-            {product.id ? "Save Changes" : "Save Product"} ↗
+          <button className="button blue" type="submit" disabled={saving}>
+            {saving ? "Saving..." : product.id ? "Save Changes" : "Save Product"} ↗
           </button>
         </div>
       </form>

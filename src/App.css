@@ -192,3 +192,13 @@
 .product-quantity input:focus { outline: 2px solid var(--gold); outline-offset: -2px; }
 .product-quantity input::-webkit-inner-spin-button,
 .product-quantity input::-webkit-outer-spin-button { opacity: 1; }
+
+.admin-menu-button, .admin-drawer-backdrop { display: none; }
+@media (max-width: 760px) {
+	.admin-menu-button { display: grid; place-items: center; width: 42px; height: 42px; margin-left: auto; border: 1px solid var(--admin-border); border-radius: 6px; background: #fff; color: var(--ink); font-size: 20px; }
+	.admin-drawer-backdrop { display: block; position: fixed; inset: 68px 0 0; z-index: 45; width: 100%; background: #10233d66; }
+	.admin-mode .sidebar { display: flex; position: fixed; inset: 68px auto 0 0; z-index: 50; width: min(280px, 86vw); transform: translateX(-105%); flex-direction: column; align-items: stretch; gap: 5px; overflow-y: auto; overflow-x: hidden; padding: 24px 15px 18px; box-shadow: 12px 0 30px #10233d26; transition: transform .22s ease; }
+	.admin-mode .sidebar.open { transform: translateX(0); }
+	.admin-mode .sidebar .eyebrow, .admin-mode .sidebar .logout, .admin-mode .sidebar small { display: block; }
+	.admin-mode .sidebar button { width: 100%; min-height: 44px; padding: 10px 12px; text-align: left; }
+}
