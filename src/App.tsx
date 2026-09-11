@@ -599,11 +599,43 @@ type Address = {
 type CustomerOrder = {
   id: number;
   orderNumber: string;
-  items: { name: string; quantity: number; price: number }[];
+  customerId?: number;
+  customerName?: string;
+  customerEmail?: string;
+  customerPhone?: string;
+  items: {
+    productId?: number;
+    productName?: string;
+    name?: string;
+    productImage?: string;
+    image?: string;
+    quantity: number;
+    price: number;
+    unitPrice?: number;
+    totalPrice?: number;
+  }[];
+  subtotal?: number;
+  deliveryCharge?: number;
   total: number;
   status: string;
-  deliveryAddress: Address;
+  paymentStatus?: string;
+  paymentMethod?: string;
+  deliveryAddress: Address | Record<string, unknown>;
   createdAt: string;
+  itemCount?: number;
+};
+const formatOrderStatus = (status: string) => {
+  const value = String(status || "PENDING").trim().toUpperCase();
+  const map: Record<string, string> = {
+    PENDING: "Pending",
+    CONFIRMED: "Confirmed",
+    PROCESSING: "Processing",
+    SHIPPED: "Shipped",
+    OUT_FOR_DELIVERY: "Out for Delivery",
+    DELIVERED: "Delivered",
+    CANCELLED: "Cancelled",
+  };
+  return map[value] || value.replace(/_/g, " ");
 };
 const logoPath = "/assets/logo/murugesan-logo.png";
 const fallbackImage =
@@ -2184,6 +2216,15 @@ function Admin({
   onLogout: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [orderCount, setOrderCount] = useState(0);
+  const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
+  useEffect(() => {
+    if (!apiToken) return;
+    fetch("/api/admin/orders", { headers: { Authorization: `Bearer ${apiToken}` } })
+      .then((response) => (response.ok ? response.json() : []))
+      .then((rows: CustomerOrder[]) => setOrderCount(rows.length))
+      .catch(() => setOrderCount(0));
+  }, [apiToken, view]);
   return (
     <>
       <header className="admin-header">
@@ -2220,7 +2261,7 @@ function Admin({
               key={item}
               onClick={() => { setView(item); setMenuOpen(false); }}
             >
-              {item === "Orders / Enquiries" && <b>3</b>}
+              {item === "Orders / Enquiries" && <b>{orderCount}</b>}
               {item}
             </button>
           ))}
@@ -2256,6 +2297,8 @@ function Admin({
             />
           ) : view === "Settings" ? (
             <AdminSettings notify={notify} />
+          ) : view === "Orders / Enquiries" ? (
+            <AdminOrdersList notify={notify} />
           ) : (
             <>
               <AdminDashboard
@@ -2382,6 +2425,160 @@ function Stat({
         {warning ? "Needs attention" : "Live now"}
       </small>
     </div>
+  );
+}
+function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
+  const [orders, setOrders] = useState<CustomerOrder[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState("All");
+  const [query, setQuery] = useState("");
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+  const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
+  const loadOrders = async () => {
+    if (!apiToken) return;
+    setLoading(true);
+    try {
+      const response = await fetch("/api/admin/orders", {
+        headers: { Authorization: `Bearer ${apiToken}` },
+      });
+      if (!response.ok) throw new Error("Unable to load orders");
+      const rows = (await response.json()) as CustomerOrder[];
+      setOrders(rows);
+    } catch {
+      notify("Unable to load orders");
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    void loadOrders();
+  }, [apiToken]);
+  const filtered = orders.filter((order) => {
+    const matchesStatus = filter === "All" || order.status === filter;
+    const matchesQuery =
+      !query ||
+      order.orderNumber.toLowerCase().includes(query.toLowerCase()) ||
+      (order.customerName || "").toLowerCase().includes(query.toLowerCase()) ||
+      (order.customerPhone || "").toLowerCase().includes(query.toLowerCase());
+    return matchesStatus && matchesQuery;
+  });
+  const updateStatus = async (orderId: number, nextStatus: string) => {
+    const response = await fetch(`/api/admin/orders/${orderId}/status`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiToken}`,
+      },
+      body: JSON.stringify({ status: nextStatus }),
+    });
+    if (!response.ok) {
+      notify("Unable to update order status");
+      return;
+    }
+    const updated = (await response.json()) as CustomerOrder;
+    setOrders((current) =>
+      current.map((order) => (order.id === updated.id ? updated : order)),
+    );
+    notify("Order status updated");
+  };
+  return (
+    <section className="panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">ORDERS</p>
+          <h2>All customer orders</h2>
+        </div>
+      </div>
+      <div className="filters" style={{ margin: "0 0 16px" }}>
+        <label className="search">
+          <span>⌕</span>
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search by order ID, customer or phone"
+          />
+        </label>
+        <select value={filter} onChange={(event) => setFilter(event.target.value)}>
+          <option value="All">All</option>
+          {[
+            "PENDING",
+            "CONFIRMED",
+            "PROCESSING",
+            "SHIPPED",
+            "OUT_FOR_DELIVERY",
+            "DELIVERED",
+            "CANCELLED",
+          ].map((status) => (
+            <option value={status} key={status}>
+              {formatOrderStatus(status)}
+            </option>
+          ))}
+        </select>
+      </div>
+      {loading ? (
+        <p>Loading orders...</p>
+      ) : filtered.length ? (
+        filtered.map((order) => (
+          <div className="order-card" key={order.id} style={{ marginBottom: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+              <div>
+                <strong>{order.orderNumber}</strong>
+                <small style={{ display: "block" }}>
+                  {order.customerName || "Customer"} · {order.customerPhone || "No phone"}
+                </small>
+              </div>
+              <span>{formatOrderStatus(order.status)}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 12, gap: 12 }}>
+              <small>{new Date(order.createdAt).toLocaleDateString()}</small>
+              <small>{order.items.length} items</small>
+              <strong>{money(order.total)}</strong>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
+              <button className="plain-button" type="button" onClick={() => setExpandedId(expandedId === order.id ? null : order.id)}>
+                {expandedId === order.id ? "Hide details" : "View details"}
+              </button>
+              <select
+                value={order.status}
+                onChange={(event) => void updateStatus(order.id, event.target.value)}
+                aria-label={`Update status for ${order.orderNumber}`}
+              >
+                {[
+                  "PENDING",
+                  "CONFIRMED",
+                  "PROCESSING",
+                  "SHIPPED",
+                  "OUT_FOR_DELIVERY",
+                  "DELIVERED",
+                  "CANCELLED",
+                ].map((status) => (
+                  <option value={status} key={status}>
+                    {formatOrderStatus(status)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {expandedId === order.id && (
+              <div style={{ marginTop: 16 }}>
+                <p><strong>Customer:</strong> {order.customerName}</p>
+                <p><strong>Email:</strong> {order.customerEmail || "N/A"}</p>
+                <p><strong>Phone:</strong> {order.customerPhone || "N/A"}</p>
+                <p><strong>Address:</strong> {typeof order.deliveryAddress === "object" && order.deliveryAddress ? Object.values(order.deliveryAddress).filter(Boolean).join(", ") : "N/A"}</p>
+                <ul>
+                  {order.items.map((item, index) => (
+                    <li key={`${order.id}-${index}`}>
+                      {item.productName || item.name || "Item"} × {item.quantity} — {money((item.unitPrice ?? item.price) * item.quantity)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        ))
+      ) : (
+        <p>No customer orders yet.</p>
+      )}
+    </section>
   );
 }
 function AdminProducts({
@@ -3309,15 +3506,28 @@ function Account({
       </section>
       <section className="customer-section">
         <p className="eyebrow">HISTORY</p>
-        <h2>My orders</h2>
+        <h2>My orders {orders.length ? <small>({orders.length})</small> : null}</h2>
         {orders.length ? (
           orders.map((order) => (
             <div className="order-card" key={order.id}>
-              <strong>{order.orderNumber}</strong>
-              <span>
-                {order.status} · {money(order.total)}
-              </span>
-              <small>{new Date(order.createdAt).toLocaleDateString()}</small>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                <strong>{order.orderNumber}</strong>
+                <span>{formatOrderStatus(order.status)}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginTop: 8 }}>
+                <small>{new Date(order.createdAt).toLocaleDateString()}</small>
+                <small>{order.items.length} items</small>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginTop: 8 }}>
+                <span>{money(order.total)}</span>
+                <button
+                  className="plain-button"
+                  type="button"
+                  onClick={() => window.alert(`${order.orderNumber}\n\n${order.items.map((item) => `${item.productName || item.name || "Item"} × ${item.quantity}`).join("\n")}\n\nTotal: ${money(order.total)}`)}
+                >
+                  View details
+                </button>
+              </div>
             </div>
           ))
         ) : (

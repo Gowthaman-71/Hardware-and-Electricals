@@ -51,13 +51,75 @@ db.exec(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
 if (!db.prepare("PRAGMA table_info(users)").all().some((column) => column.name === 'mobile_number')) {
   db.exec('ALTER TABLE users ADD COLUMN mobile_number TEXT');
 }
+if (db.prepare("PRAGMA table_info(orders)").all().length) {
+  const orderColumns = new Set(db.prepare('PRAGMA table_info(orders)').all().map((column) => column.name));
+  if (!orderColumns.has('order_number')) db.exec('ALTER TABLE orders ADD COLUMN order_number TEXT');
+  if (!orderColumns.has('customer_email')) db.exec('ALTER TABLE orders ADD COLUMN customer_email TEXT DEFAULT ""');
+  if (!orderColumns.has('delivery_charge')) db.exec('ALTER TABLE orders ADD COLUMN delivery_charge REAL DEFAULT 0');
+  if (!orderColumns.has('payment_method')) db.exec('ALTER TABLE orders ADD COLUMN payment_method TEXT DEFAULT "Cash on Delivery"');
+  if (!orderColumns.has('idempotency_key')) db.exec('ALTER TABLE orders ADD COLUMN idempotency_key TEXT');
+  if (!orderColumns.has('notification_status')) db.exec('ALTER TABLE orders ADD COLUMN notification_status TEXT DEFAULT "PENDING"');
+  if (!orderColumns.has('notification_sent_at')) db.exec('ALTER TABLE orders ADD COLUMN notification_sent_at TEXT');
+  if (!orderColumns.has('notification_message_id')) db.exec('ALTER TABLE orders ADD COLUMN notification_message_id TEXT');
+}
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_mobile_number ON users(mobile_number) WHERE mobile_number IS NOT NULL');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_order_number ON orders(order_number) WHERE order_number IS NOT NULL');
 const now = () => new Date().toISOString();
 const normalizeMobile = (value) => String(value || '').replace(/\D/g, '').replace(/^91(?=\d{10}$)/, '');
+const normalizeWhatsappNumber = (value) => {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.length === 10) return `+91${digits}`;
+  if (digits.length === 12 && digits.startsWith('91')) return `+${digits}`;
+  if (digits.startsWith('+')) return digits;
+  return `+${digits}`;
+};
 const slugify = (value) => value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 const safeJson = (value, fallback) => { try { return JSON.parse(value); } catch { return fallback; } };
+const normalizeOrderStatus = (value) => {
+  const normalized = String(value || 'PENDING').trim().toUpperCase().replace(/\s+/g, '_');
+  const allowed = new Set(['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED']);
+  return allowed.has(normalized) ? normalized : 'PENDING';
+};
+const formatOrderStatusLabel = (value) => {
+  const labelMap = {
+    PENDING: 'Pending',
+    CONFIRMED: 'Confirmed',
+    PROCESSING: 'Processing',
+    SHIPPED: 'Shipped',
+    OUT_FOR_DELIVERY: 'Out for Delivery',
+    DELIVERED: 'Delivered',
+    CANCELLED: 'Cancelled',
+  };
+  return labelMap[normalizeOrderStatus(value)] || 'Pending';
+};
+const ownerWhatsappNumber = normalizeWhatsappNumber(process.env.OWNER_WHATSAPP_NUMBER || '+919361866771');
+const msg91AuthKey = process.env.MSG91_AUTH_KEY || '';
+const msg91SenderId = process.env.MSG91_SENDER_ID || 'MSGIND';
+const msg91BaseUrl = process.env.MSG91_BASE_URL || 'https://api.msg91.com/api/v5/whatsapp/send';
 const mapAddress = (row) => ({ id: row.id, customerId: row.customer_id, type: row.type, fullName: row.full_name, phone: row.phone, addressLine1: row.address_line1, addressLine2: row.address_line2, area: row.area, city: row.city, state: row.state, pincode: row.pincode, isDefault: Boolean(row.is_default), createdAt: row.created_at, updatedAt: row.updated_at });
-const mapOrder = (row) => ({ id: row.id, orderNumber: `ORD-${String(row.id).padStart(4, '0')}`, customerId: row.customer_id, items: safeJson(row.items_json, []), subtotal: row.subtotal, total: row.total, status: row.status, paymentStatus: row.payment_status, customerName: row.customer_name, customerPhone: row.customer_phone, deliveryAddress: safeJson(row.delivery_address_json, {}), createdAt: row.created_at, updatedAt: row.updated_at });
+const mapOrder = (row) => {
+  const items = safeJson(row.items_json, []);
+  return {
+    id: row.id,
+    orderNumber: row.order_number || `MH-${String(Number(row.id) + 1000)}`,
+    customerId: row.customer_id,
+    customerName: row.customer_name,
+    customerEmail: row.customer_email || '',
+    customerPhone: row.customer_phone,
+    items,
+    subtotal: Number(row.subtotal || 0),
+    deliveryCharge: Number(row.delivery_charge || 0),
+    total: Number(row.total || 0),
+    status: normalizeOrderStatus(row.status),
+    paymentMethod: row.payment_method || 'Cash on Delivery',
+    paymentStatus: String(row.payment_status || 'PENDING'),
+    deliveryAddress: safeJson(row.delivery_address_json, {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    itemCount: Array.isArray(items) ? items.reduce((count, item) => count + Number(item.quantity || 0), 0) : 0,
+  };
+};
 const mapCategory = (row) => ({ ...row, parentId: row.parent_id, image: row.image_url, active: row.status === 'ACTIVE', order: row.sort_order });
 const mapBrand = (row) => ({ ...row, logoUrl: row.logo_url, active: row.status === 'ACTIVE' });
 const mapProductType = (row) => ({ ...row, categoryId: row.category_id, active: row.status === 'ACTIVE' });
@@ -68,6 +130,7 @@ function seed() {
   const adminEmail = String(process.env.ADMIN_EMAIL || 'owner@murugesan.in').trim().toLowerCase();
   const adminMobile = normalizeMobile(process.env.ADMIN_MOBILE || '9361866771');
   const configuredPassword = process.env.ADMIN_PASSWORD || 'change-this-before-production';
+  const hasAdminMobileConflict = !!db.prepare('SELECT id FROM users WHERE mobile_number = ? AND role = ? AND id IS NOT ?').get(adminMobile, 'ADMIN', null);
   let existingAdmin = db.prepare('SELECT id FROM users WHERE email = ? AND role = ?').get(adminEmail, 'ADMIN');
   if (!existingAdmin) {
     existingAdmin = db.prepare("SELECT id FROM users WHERE role = 'ADMIN' ORDER BY id LIMIT 1").get();
@@ -75,9 +138,12 @@ function seed() {
   }
   if (!existingAdmin) {
     const timestamp = now();
-    db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').run('Store Owner', adminEmail, adminMobile, bcrypt.hashSync(configuredPassword, 12), 'ADMIN', 'ACTIVE', timestamp, timestamp);
+    db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').run('Store Owner', adminEmail, adminMobile && !hasAdminMobileConflict ? adminMobile : null, bcrypt.hashSync(configuredPassword, 12), 'ADMIN', 'ACTIVE', timestamp, timestamp);
   } else {
-    db.prepare("UPDATE users SET email = ?, mobile_number = COALESCE(mobile_number, ?), status = 'ACTIVE', updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(adminEmail, adminMobile, now(), existingAdmin.id);
+    const existingMobile = db.prepare('SELECT mobile_number FROM users WHERE id = ?').get(existingAdmin.id)?.mobile_number;
+    const duplicateMobile = db.prepare('SELECT id FROM users WHERE mobile_number = ? AND id != ?').get(adminMobile, existingAdmin.id);
+    const safeAdminMobile = adminMobile && !duplicateMobile ? adminMobile : existingMobile || null;
+    db.prepare("UPDATE users SET email = ?, mobile_number = ?, status = 'ACTIVE', updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(adminEmail, safeAdminMobile, now(), existingAdmin.id);
   }
   if (db.prepare('SELECT COUNT(*) count FROM categories').get().count > 0) return;
   const categoryNames = ['Electrical Switches', 'Sockets', 'Wires & Cables', 'Lighting', 'Fan Regulators', 'Electrical Accessories', 'Tools', 'Hardware', 'Plumbing Accessories', 'Other Products'];
@@ -116,8 +182,138 @@ app.get('/api/me/addresses', auth, (req, res) => { if (req.user.role !== 'CUSTOM
 app.post('/api/me/addresses', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; const fullName = String(body.fullName ?? body.full_name ?? '').trim(); const phone = String(body.phone ?? '').trim(); const addressLine1 = String(body.addressLine1 ?? body.address_line1 ?? '').trim(); const city = String(body.city ?? '').trim(); const state = String(body.state ?? '').trim(); const pincode = String(body.pincode ?? '').trim(); const required = [fullName, phone, addressLine1, city, state, pincode]; if (required.some((field) => !field) || !/^\d{10}$/.test(phone.replace(/\D/g, '')) || !/^\d{6}$/.test(pincode.trim())) return res.status(400).json({ error: 'Please provide valid required address details' }); const timestamp = now(); const makeDefault = Boolean(body.isDefault ?? body.is_default) || !db.prepare('SELECT 1 FROM addresses WHERE customer_id = ? LIMIT 1').get(req.user.id); const insert = db.prepare('INSERT INTO addresses (customer_id,type,full_name,phone,address_line1,address_line2,area,city,state,pincode,is_default,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)'); db.exec('BEGIN'); try { if (makeDefault) db.prepare('UPDATE addresses SET is_default = 0 WHERE customer_id = ?').run(req.user.id); const result = insert.run(req.user.id, ['Home', 'Office', 'Other'].includes(body.type ?? body.address_type) ? (body.type ?? body.address_type) : 'Home', fullName, phone, addressLine1, String(body.addressLine2 ?? body.address_line2 ?? '').trim(), String(body.area ?? '').trim(), city, state, pincode, makeDefault ? 1 : 0, timestamp, timestamp); db.exec('COMMIT'); res.status(201).json(mapAddress(db.prepare('SELECT * FROM addresses WHERE id = ?').get(result.lastInsertRowid))); } catch (error) { db.exec('ROLLBACK'); res.status(400).json({ error: 'Unable to save address' }); } });
 app.patch('/api/me/addresses/:id', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; const current = db.prepare('SELECT * FROM addresses WHERE id = ? AND customer_id = ?').get(Number(req.params.id), req.user.id); if (!current) return res.status(404).json({ error: 'Address not found' }); const fullName = String(body.fullName ?? body.full_name ?? current.full_name).trim(); const phone = String(body.phone ?? current.phone).trim(); const addressLine1 = String(body.addressLine1 ?? body.address_line1 ?? current.address_line1).trim(); const city = String(body.city ?? current.city).trim(); const state = String(body.state ?? current.state).trim(); const pincode = String(body.pincode ?? current.pincode).trim(); const makeDefault = Boolean(body.isDefault ?? body.is_default); if (makeDefault) db.prepare('UPDATE addresses SET is_default = 0 WHERE customer_id = ?').run(req.user.id); db.prepare('UPDATE addresses SET type = ?, full_name = ?, phone = ?, address_line1 = ?, address_line2 = ?, area = ?, city = ?, state = ?, pincode = ?, is_default = ?, updated_at = ? WHERE id = ? AND customer_id = ?').run(body.type || current.type, fullName, phone, addressLine1, String(body.addressLine2 ?? body.address_line2 ?? current.address_line2).trim(), String(body.area ?? current.area).trim(), city, state, pincode, makeDefault ? 1 : current.is_default, now(), current.id, req.user.id); res.json(mapAddress(db.prepare('SELECT * FROM addresses WHERE id = ?').get(current.id))); });
 app.delete('/api/me/addresses/:id', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const result = db.prepare('DELETE FROM addresses WHERE id = ? AND customer_id = ?').run(Number(req.params.id), req.user.id); if (!result.changes) return res.status(404).json({ error: 'Address not found' }); const remaining = db.prepare('SELECT id FROM addresses WHERE customer_id = ? ORDER BY created_at LIMIT 1').get(req.user.id); if (remaining) db.prepare('UPDATE addresses SET is_default = 1 WHERE id = ? AND NOT EXISTS (SELECT 1 FROM addresses WHERE customer_id = ? AND is_default = 1)').run(remaining.id, req.user.id); res.status(204).end(); });
-app.get('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); res.json(db.prepare('SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC').all(req.user.id).map(mapOrder)); });
-app.post('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; const address = db.prepare('SELECT * FROM addresses WHERE id = ? AND customer_id = ?').get(Number(body.addressId), req.user.id); const user = db.prepare('SELECT name FROM users WHERE id = ?').get(req.user.id); if (!address || !Array.isArray(body.items) || !body.items.length) return res.status(400).json({ error: 'A delivery address and cart items are required' }); const items = body.items.map((item) => ({ productId: item.productId, name: item.name, quantity: Number(item.quantity), price: Number(item.price) })); const subtotal = items.reduce((total, item) => total + item.price * item.quantity, 0); const timestamp = now(); const snapshot = mapAddress(address); const result = db.prepare('INSERT INTO orders (customer_id,items_json,subtotal,total,status,payment_status,customer_name,customer_phone,delivery_address_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(req.user.id, JSON.stringify(items), subtotal, subtotal, 'PROCESSING', 'PENDING', user.name, address.phone, JSON.stringify(snapshot), timestamp, timestamp); res.status(201).json(mapOrder(db.prepare('SELECT * FROM orders WHERE id = ?').get(result.lastInsertRowid))); });
+app.get('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const rows = db.prepare('SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC').all(req.user.id).map(mapOrder); res.json(rows); });
+app.get('/api/orders/:id', auth, (req, res) => { const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id)); if (!order) return res.status(404).json({ error: 'Order not found' }); const mapped = mapOrder(order); if (req.user.role === 'ADMIN' || Number(req.user.id) === Number(order.customer_id)) return res.json(mapped); return res.status(403).json({ error: 'You do not have access to this order' }); });
+app.get('/api/admin/orders', auth, admin, (_req, res) => { const rows = db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all().map(mapOrder); res.json(rows); });
+app.patch('/api/admin/orders/:id/status', auth, admin, (req, res) => { const status = normalizeOrderStatus(req.body?.status); const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id)); if (!order) return res.status(404).json({ error: 'Order not found' }); const result = db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(status, now(), Number(req.params.id)); if (!result.changes) return res.status(400).json({ error: 'Unable to update order status' }); res.json(mapOrder(db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id)))); });
+const sendOwnerWhatsAppNotification = async (order) => {
+  const ownerNumber = ownerWhatsappNumber;
+  if (!ownerNumber || !msg91AuthKey) {
+    console.warn('WhatsApp notification skipped: OWNER_WHATSAPP_NUMBER and MSG91_AUTH_KEY must be configured.');
+    return { ok: false, skipped: true, reason: 'missing configuration' };
+  }
+  const items = Array.isArray(order.items) ? order.items : [];
+  const itemSummary = items.length
+    ? items.map((item, index) => `${index + 1}. ${item.productName || item.name || 'Item'} × ${item.quantity} — ${money(item.unitPrice ?? item.price ?? 0)}`).join('\n')
+    : 'No items available';
+  const message = [
+    '🛒 NEW ORDER RECEIVED',
+    '',
+    'Murugesan Electrical and Hardwares',
+    `Order ID: ${order.orderNumber}`,
+    `Customer: ${order.customerName || 'Customer'}`,
+    `Phone: ${order.customerPhone || 'Not available'}`,
+    '',
+    'Items:',
+    itemSummary,
+    '',
+    `Total: ${money(order.total)}`,
+    `Status: ${formatOrderStatusLabel(order.status || 'PENDING')}`,
+    '',
+    `Address: ${typeof order.deliveryAddress === 'object' && order.deliveryAddress ? [order.deliveryAddress.addressLine1, order.deliveryAddress.area, order.deliveryAddress.city, order.deliveryAddress.state, order.deliveryAddress.pincode].filter(Boolean).join(', ') : 'Delivery address unavailable'}`,
+    '',
+    'Please open the owner dashboard to manage this order.',
+  ].join('\n');
+  const payload = {
+    authkey: msg91AuthKey,
+    mobiles: ownerNumber.replace(/\D/g, ''),
+    message,
+    sender: msg91SenderId,
+    route: '4',
+    country: '91',
+  };
+  try {
+    const response = await fetch(msg91BaseUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const text = await response.text();
+    let result = {};
+    try { result = JSON.parse(text); } catch { result = { raw: text }; }
+    if (!response.ok) {
+      console.error('MSG91 WhatsApp notification failed', {
+        orderId: order.id,
+        status: response.status,
+        response: result,
+      });
+      return { ok: false, skipped: false, reason: 'provider error', response: result };
+    }
+    console.log('MSG91 WhatsApp notification accepted', {
+      orderId: order.id,
+      status: response.status,
+      response: result,
+    });
+    return {
+      ok: true,
+      skipped: false,
+      messageId: result?.messageId || result?.message_id || result?.requestId || null,
+      response: result,
+    };
+  } catch (error) {
+    console.error('MSG91 WhatsApp notification raised an exception', {
+      orderId: order.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { ok: false, skipped: false, reason: 'network error' };
+  }
+};
+app.post('/api/me/orders', auth, async (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; const address = db.prepare('SELECT * FROM addresses WHERE id = ? AND customer_id = ?').get(Number(body.addressId), req.user.id); const user = db.prepare('SELECT id,name,email,mobile_number FROM users WHERE id = ?').get(req.user.id); if (!address || !user || !Array.isArray(body.items) || !body.items.length) return res.status(400).json({ error: 'A delivery address and cart items are required' }); const normalizedItems = body.items.map((item) => ({ productId: Number(item.productId), name: String(item.name || '').trim(), quantity: Number(item.quantity || 0), price: Number(item.price || 0) })).filter((item) => item.productId && item.name && item.quantity > 0 && Number.isFinite(item.price)); if (!normalizedItems.length) return res.status(400).json({ error: 'Order items are invalid' }); const productIds = normalizedItems.map((item) => item.productId);
+  const placeholders = productIds.map(() => '?').join(',');
+  const catalog = db.prepare(`SELECT * FROM products WHERE id IN (${placeholders})`).all(...productIds);
+  const catalogMap = new Map(catalog.map((product) => [product.id, product]));
+  const snapshotItems = normalizedItems.map((item) => {
+    const product = catalogMap.get(item.productId);
+    if (!product) throw new Error(`Product ${item.productId} is unavailable`);
+    const quantity = Number(item.quantity || 0);
+    if (quantity <= 0) throw new Error(`Invalid quantity for ${product.name}`);
+    const finalPrice = Number(product.price || 0);
+    return {
+      productId: product.id,
+      productName: product.name,
+      productImage: product.image_url || '',
+      quantity,
+      unitPrice: finalPrice,
+      totalPrice: finalPrice * quantity,
+      name: product.name,
+      price: finalPrice,
+    };
+  });
+  const subtotal = snapshotItems.reduce((total, item) => total + item.totalPrice, 0);
+  const deliveryCharge = 0;
+  const total = subtotal + deliveryCharge;
+  const timestamp = now();
+  const snapshot = mapAddress(address);
+  const orderNumber = `MH-${String(Date.now()).slice(-6)}`;
+  const idempotencyKey = String(body.idempotencyKey || `${req.user.id}:${orderNumber}:${timestamp}`);
+  const existing = db.prepare('SELECT * FROM orders WHERE idempotency_key = ?').get(idempotencyKey);
+  if (existing) return res.status(200).json(mapOrder(existing));
+  db.exec('BEGIN');
+  try {
+    const result = db.prepare('INSERT INTO orders (order_number,customer_id,customer_name,customer_email,customer_phone,items_json,subtotal,delivery_charge,total,status,payment_method,payment_status,delivery_address_json,idempotency_key,notification_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(orderNumber, req.user.id, user.name, user.email || `${user.mobile_number}@mobile.local`, address.phone, JSON.stringify(snapshotItems), subtotal, deliveryCharge, total, 'PENDING', 'Cash on Delivery', 'PENDING', JSON.stringify(snapshot), idempotencyKey, 'PENDING', timestamp, timestamp);
+    const orderId = Number(result.lastInsertRowid);
+    const orderItemInsert = db.prepare('INSERT INTO order_items (order_id,product_id,product_name,product_image,quantity,unit_price,total_price,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)');
+    for (const item of snapshotItems) {
+      orderItemInsert.run(orderId, item.productId, item.productName, item.productImage, item.quantity, item.unitPrice, item.totalPrice, timestamp, timestamp);
+    }
+    db.exec('COMMIT');
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+    const mappedOrder = mapOrder(order);
+    const notification = await sendOwnerWhatsAppNotification(mappedOrder);
+    const notificationStatus = notification.ok ? 'SENT' : 'FAILED';
+    const messageId = notification.messageId || null;
+    const sentAt = notification.ok ? now() : null;
+    db.prepare('UPDATE orders SET notification_status = ?, notification_sent_at = ?, notification_message_id = ?, updated_at = ? WHERE id = ?').run(notificationStatus, sentAt, messageId, now(), orderId);
+    res.status(201).json(mapOrder(db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId)));
+  } catch (error) {
+    db.exec('ROLLBACK');
+    if (String(error.message).includes('UNIQUE')) {
+      const existingDuplicate = db.prepare('SELECT * FROM orders WHERE idempotency_key = ?').get(idempotencyKey);
+      if (existingDuplicate) return res.status(200).json(mapOrder(existingDuplicate));
+    }
+    res.status(400).json({ error: 'Unable to create order. Please try again.' });
+  }
+});
 app.get('/api/catalog', (_req, res) => { const categories = db.prepare("SELECT * FROM categories WHERE status = 'ACTIVE' ORDER BY sort_order, name").all().map(mapCategory); const products = db.prepare(`${productSelect} WHERE p.status = 'ACTIVE' ORDER BY p.created_at DESC`).all().map(mapProduct); res.json({ categories, products }); });
 app.get('/api/categories', (_req, res) => res.json(db.prepare('SELECT * FROM categories ORDER BY sort_order, name').all().map(mapCategory)));
 app.post('/api/categories', auth, admin, (req, res) => { const body = req.body || {}; const timestamp = now(); try { const result = db.prepare('INSERT INTO categories (name,slug,parent_id,image_url,description,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)').run(String(body.name).trim(), slugify(body.slug || body.name), body.parentId || null, body.imageUrl || null, body.description || '', body.status || 'ACTIVE', Number(body.sortOrder || 0), timestamp, timestamp); res.status(201).json(mapCategory(db.prepare('SELECT * FROM categories WHERE id = ?').get(result.lastInsertRowid))); } catch (error) { res.status(400).json({ error: error.message.includes('UNIQUE') ? 'Category slug already exists' : 'Unable to create category' }); } });

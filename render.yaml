@@ -15,6 +15,14 @@ services:
         sync: false
       - key: ADMIN_MOBILE
         value: 9361866771
+      - key: OWNER_WHATSAPP_NUMBER
+        value: +919361866771
+      - key: MSG91_AUTH_KEY
+        sync: false
+      - key: MSG91_SENDER_ID
+        value: MSGIND
+      - key: MSG91_BASE_URL
+        value: https://api.msg91.com/api/v5/whatsapp/send
       - key: DATABASE_PATH
         value: /var/data/catalog.sqlite
       - key: UPLOAD_DIR

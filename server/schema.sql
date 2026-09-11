@@ -32,19 +32,41 @@ CREATE INDEX IF NOT EXISTS idx_addresses_customer ON addresses(customer_id, is_d
 
 CREATE TABLE IF NOT EXISTS orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_number TEXT NOT NULL UNIQUE,
   customer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  customer_name TEXT NOT NULL,
+  customer_email TEXT NOT NULL DEFAULT '',
+  customer_phone TEXT NOT NULL,
   items_json TEXT NOT NULL DEFAULT '[]',
   subtotal REAL NOT NULL DEFAULT 0,
+  delivery_charge REAL NOT NULL DEFAULT 0,
   total REAL NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'PROCESSING',
-  payment_status TEXT NOT NULL DEFAULT 'PENDING',
-  customer_name TEXT NOT NULL,
-  customer_phone TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED')),
+  payment_method TEXT NOT NULL DEFAULT 'Cash on Delivery',
+  payment_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (payment_status IN ('PENDING', 'PAID', 'FAILED', 'REFUNDED')),
   delivery_address_json TEXT NOT NULL,
+  notification_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (notification_status IN ('PENDING', 'SENT', 'FAILED')),
+  notification_sent_at TEXT,
+  notification_message_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_orders_customer_created ON orders(customer_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS order_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  product_id INTEGER,
+  product_name TEXT NOT NULL,
+  product_image TEXT,
+  quantity INTEGER NOT NULL DEFAULT 1,
+  unit_price REAL NOT NULL DEFAULT 0,
+  total_price REAL NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id, product_id);
 
 CREATE TABLE IF NOT EXISTS categories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
