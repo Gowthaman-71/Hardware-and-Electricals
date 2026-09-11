@@ -2458,6 +2458,11 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
               <small>{order.items.length} items</small>
               <strong>{money(order.total)}</strong>
             </div>
+            <div style={{ marginTop: 12 }}>
+              <p><strong>Customer:</strong> {order.customerName || "Customer"}</p>
+              <p><strong>Mobile:</strong> {order.customerPhone || "N/A"}</p>
+              {order.gstNumber && <p><strong>GST:</strong> {order.gstNumber}</p>}
+            </div>
             <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
               <button className="plain-button" type="button" onClick={() => setExpandedId(expandedId === order.id ? null : order.id)}>
                 {expandedId === order.id ? "Hide details" : "View details"}
@@ -3194,14 +3199,12 @@ function CustomerLogin({
           </label>
         )}
         <label>
-          Mobile number
+          Mobile number or email
           <input
-            type="tel"
-            inputMode="tel"
-            pattern="(?:\+?91[\s-]*)?[6-9](?:[\s-]*\d){9}"
+            type="text"
             value={mobile}
             onChange={(event) => setMobile(event.target.value)}
-            placeholder="+91 93618 67771"
+            placeholder="+91 93618 67771 or name@example.com"
             required
           />
         </label>
