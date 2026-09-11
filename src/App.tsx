@@ -1920,7 +1920,7 @@ function Login({
                 onChange={(e) => setMobile(e.target.value)}
                 placeholder="+91 93618 67771"
                 inputMode="tel"
-                pattern="(?:\+?91\s*)?[6-9]\d{9}"
+                pattern="(?:\+?91[\s-]*)?[6-9](?:[\s-]*\d){9}"
                 required
               />
             </label>
@@ -3194,7 +3194,7 @@ function CustomerLogin({
           <input
             type="tel"
             inputMode="tel"
-            pattern="(?:\+?91\s*)?[6-9]\d{9}"
+            pattern="(?:\+?91[\s-]*)?[6-9](?:[\s-]*\d){9}"
             value={mobile}
             onChange={(event) => setMobile(event.target.value)}
             placeholder="+91 93618 67771"
