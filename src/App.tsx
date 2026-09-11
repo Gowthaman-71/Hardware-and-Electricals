@@ -642,108 +642,6 @@ const fallbackImage =
   "https://images.unsplash.com/photo-1621905252507-b35492cc74b4?auto=format&fit=crop&w=900&q=80";
 const image = (id: string) =>
   `https://images.unsplash.com/${id}?auto=format&fit=crop&w=900&q=82`;
-const categoriesSeed: Category[] = [
-  "Electrical Switches",
-  "Sockets",
-  "Wires & Cables",
-  "Lighting",
-  "Fan Regulators",
-  "Electrical Accessories",
-  "Tools",
-  "Hardware",
-  "Plumbing Accessories",
-  "Other Products",
-].map((name, id) => ({
-  id: id + 1,
-  name,
-  description: "Reliable products for everyday work.",
-}));
-const productsSeed: Product[] = [
-  {
-    id: 1,
-    name: "10A Bell Push",
-    code: "1401",
-    category: "Electrical Switches",
-    brand: "Anchor",
-    price: 95,
-    mrp: 120,
-    stock: 42,
-    unit: "Nos",
-    image: image("photo-1621905252507-b35492cc74b4"),
-    description: "Compact bell push for residential and commercial use.",
-    details: "10A / Modular / White finish",
-  },
-  {
-    id: 2,
-    name: "10A 2 Way Switch",
-    code: "1402",
-    category: "Electrical Switches",
-    brand: "Anchor",
-    price: 120,
-    mrp: 145,
-    stock: 50,
-    unit: "Nos",
-    image: image("photo-1558618666-fcd25c85cd64"),
-    description: "Durable modular switch for everyday electrical work.",
-    details: "10A / 2-way / Modular",
-  },
-  {
-    id: 3,
-    name: "Universal Socket",
-    code: "US-10",
-    category: "Sockets",
-    brand: "GM",
-    price: 250,
-    mrp: 290,
-    stock: 24,
-    unit: "Nos",
-    image: image("photo-1558618666-fcd25c85cd64"),
-    description: "Safe, compact universal socket with a clean finish.",
-    details: "6A-16A / Universal / Modular",
-  },
-  {
-    id: 4,
-    name: "Fan Regulator",
-    code: "FR-05",
-    category: "Fan Regulators",
-    brand: "Lifemax",
-    price: 320,
-    mrp: 375,
-    stock: 8,
-    unit: "Nos",
-    image: image("photo-1504148455328-c376907d081c"),
-    description: "Smooth speed control for ceiling and wall fans.",
-    details: "5-step / Silent operation",
-  },
-  {
-    id: 5,
-    name: "LED Foot Light",
-    code: "FL-03",
-    category: "Lighting",
-    brand: "Wipro",
-    price: 180,
-    mrp: 225,
-    stock: 0,
-    unit: "Nos",
-    image: image("photo-1513506003901-1e6a229e2d15"),
-    description: "Warm, efficient accent light for steps and passages.",
-    details: "3W / Warm white / LED",
-  },
-  {
-    id: 6,
-    name: "Impact Drill 650W",
-    code: "BH-650-ID",
-    category: "Tools",
-    brand: "Bosch",
-    price: 3290,
-    mrp: 3999,
-    stock: 6,
-    unit: "Set",
-    image: image("photo-1535813547-99c9c7c41d4d"),
-    description: "Jobsite-ready impact drill with a 13mm chuck.",
-    details: "650W / 13mm chuck",
-  },
-];
 const money = (value: number) => `₹${value.toLocaleString("en-IN")}`;
 const statusOf = (stock: number) =>
   stock === 0 ? "Out of stock" : stock < 10 ? "Low stock" : "In stock";
@@ -834,8 +732,15 @@ function App() {
       return true;
     }
   });
-  const [products, setProducts] = useState<Product[]>(productsSeed);
-  const [categories, setCategories] = useState<Category[]>(categoriesSeed);
+  const readStoredToken = (key: string) => {
+    try {
+      return localStorage.getItem(key) || sessionStorage.getItem(key) || "";
+    } catch {
+      return "";
+    }
+  };
+  const [products, setProducts] = useState<Product[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [screen, setScreenState] = useState<Screen>("home");
   const [adminView, setAdminView] = useState("Dashboard");
   const [selected, setSelected] = useState<Product | null>(null);
@@ -849,20 +754,8 @@ function App() {
     }
   });
   const [editing, setEditing] = useState<Product | null>(null);
-  const [authToken, setAuthToken] = useState(() => {
-    try {
-      return sessionStorage.getItem("murugesan-auth-token") || "";
-    } catch {
-      return "";
-    }
-  });
-  const [customerToken, setCustomerToken] = useState(() => {
-    try {
-      return sessionStorage.getItem("murugesan-customer-token") || "";
-    } catch {
-      return "";
-    }
-  });
+  const [authToken, setAuthToken] = useState(() => readStoredToken("murugesan-auth-token"));
+  const [customerToken, setCustomerToken] = useState(() => readStoredToken("murugesan-customer-token"));
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [catalogError, setCatalogError] = useState("");
   const [toast, setToast] = useState("");
@@ -881,34 +774,59 @@ function App() {
   }, [cart]);
   useEffect(() => {
     let mounted = true;
-    const refreshCatalog = () => {
-      loadCatalog()
-        .then((catalog) => {
-          if (!mounted) return;
-          setProducts(catalog.products);
-          setCategories(catalog.categories);
-          setCatalogError("");
-        })
-        .catch(() => {
-          if (mounted) {
-            setCatalogError(
-              "Unable to load the live catalog. Showing sample data.",
-            );
-          }
-        });
+    const refreshCatalog = async () => {
+      try {
+        const catalog = await loadCatalog();
+        if (!mounted) return;
+        setProducts(catalog.products);
+        setCategories(catalog.categories);
+        setCatalogError("");
+      } catch {
+        if (mounted) {
+          setCatalogError("Unable to load the live catalog. Please try again.");
+        }
+      }
     };
-    refreshCatalog();
-    const interval = window.setInterval(refreshCatalog, 5000);
+    void refreshCatalog();
+    const interval = window.setInterval(() => { void refreshCatalog(); }, 5000);
     const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") refreshCatalog();
+      if (document.visibilityState === "visible") void refreshCatalog();
     };
-    window.addEventListener("focus", refreshCatalog);
+    window.addEventListener("focus", () => { void refreshCatalog(); });
     document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => {
       mounted = false;
       window.clearInterval(interval);
-      window.removeEventListener("focus", refreshCatalog);
+      window.removeEventListener("focus", () => { void refreshCatalog(); });
       document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, []);
+  useEffect(() => {
+    let active = true;
+    const restoreCustomerSession = async () => {
+      const storedToken = readStoredToken("murugesan-customer-token");
+      if (!storedToken) return;
+      try {
+        const response = await fetch("/api/me", {
+          headers: { Authorization: `Bearer ${storedToken}` },
+        });
+        if (!response.ok) {
+          localStorage.removeItem("murugesan-customer-token");
+          sessionStorage.removeItem("murugesan-customer-token");
+          return;
+        }
+        const profile = (await response.json()) as Customer;
+        if (!active) return;
+        setCustomerToken(storedToken);
+        setCustomer(profile);
+      } catch {
+        localStorage.removeItem("murugesan-customer-token");
+        sessionStorage.removeItem("murugesan-customer-token");
+      }
+    };
+    void restoreCustomerSession();
+    return () => {
+      active = false;
     };
   }, []);
   const notify = (message: string) => {
@@ -1073,6 +991,7 @@ function App() {
           onLogin={async (mobile, password) => {
             const result = await loginRequest(mobile, password);
             setAuthToken(result.token);
+            localStorage.setItem("murugesan-auth-token", result.token);
             sessionStorage.setItem("murugesan-auth-token", result.token);
             setScreen("admin");
           }}
@@ -1083,6 +1002,7 @@ function App() {
           onLogin={(result) => {
             setCustomerToken(result.token);
             setCustomer(result.user);
+            localStorage.setItem("murugesan-customer-token", result.token);
             sessionStorage.setItem("murugesan-customer-token", result.token);
             setScreen("account");
           }}
@@ -1097,6 +1017,7 @@ function App() {
           onLogout={() => {
             setCustomerToken("");
             setCustomer(null);
+            localStorage.removeItem("murugesan-customer-token");
             sessionStorage.removeItem("murugesan-customer-token");
             setScreen("home");
           }}
@@ -1116,6 +1037,7 @@ function App() {
           onStore={() => setScreen("home")}
           onLogout={() => {
             setAuthToken("");
+            localStorage.removeItem("murugesan-auth-token");
             sessionStorage.removeItem("murugesan-auth-token");
             setScreen("home");
           }}
