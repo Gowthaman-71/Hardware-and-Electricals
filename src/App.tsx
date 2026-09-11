@@ -732,7 +732,7 @@ async function loginRequest(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mobile: mobile.replace(/\D/g, ""), password }),
   });
-  if (!response.ok) throw new Error("Invalid email or password");
+  if (!response.ok) throw new Error("Invalid mobile number or password");
   return response.json();
 }
 async function saveProductRequest(
@@ -1783,174 +1783,60 @@ function Login({
   onLogin: (mobile: string, password: string) => Promise<void>;
 }) {
   const [mobile, setMobile] = useState("");
-  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [code, setCode] = useState("");
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
-  const [resetMode, setResetMode] = useState(false);
-  const requestReset = async () => {
-    setError("");
-    setNotice("");
-    try {
-      const response = await fetch("/api/auth/forgot-password", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
-      });
-      const result = await response.json();
-      if (!response.ok)
-        throw new Error(result.error || "Unable to start password reset");
-      setNotice(
-        result.resetCode
-          ? `Development reset code: ${result.resetCode}`
-          : result.message,
-      );
-    } catch (reason: unknown) {
-      setError(
-        reason instanceof Error
-          ? reason.message
-          : "Unable to start password reset",
-      );
-    }
-  };
-  const resetPassword = async () => {
-    setError("");
-    setNotice("");
-    try {
-      const response = await fetch("/api/auth/reset-password", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, code, password }),
-      });
-      const result = await response.json();
-      if (!response.ok)
-        throw new Error(result.error || "Unable to reset password");
-      setNotice(result.message);
-      setResetMode(false);
-      setPassword("");
-      setCode("");
-    } catch (reason: unknown) {
-      setError(
-        reason instanceof Error ? reason.message : "Unable to reset password",
-      );
-    }
-  };
+  const [loading, setLoading] = useState(false);
   return (
     <main className="login-page">
       <div className="login-card">
         <Logo />
         <p className="eyebrow">STORE MANAGEMENT</p>
-        <h1>{resetMode ? "Reset password." : "Welcome back."}</h1>
-        <p>
-          {resetMode
-            ? "Request a reset code, then choose a new password."
-            : "Sign in to manage your products, inventory and enquiries."}
-        </p>
-        {resetMode ? (
-          <>
-            <label>
-              Email
-              <input
-                autoFocus
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="owner@murugesan.in"
-                required
-              />
-            </label>
-            <button
-              className="plain-button"
-              type="button"
-              onClick={requestReset}
-            >
-              Send reset code
-            </button>
-            <label>
-              Reset code
-              <input
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                placeholder="6-digit code"
-              />
-            </label>
-            <label>
-              New password
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="At least 8 characters"
-              />
-            </label>
-            <button
-              className="button blue"
-              type="button"
-              onClick={resetPassword}
-            >
-              Reset password ↗
-            </button>
-            <button
-              className="plain-button"
-              type="button"
-              onClick={() => setResetMode(false)}
-            >
-              Back to sign in
-            </button>
-          </>
-        ) : (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              setError("");
-              onLogin(mobile, password).catch((reason: unknown) =>
+        <h1>Welcome back.</h1>
+        <p>Sign in with your mobile number and password.</p>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            setError("");
+            setLoading(true);
+            onLogin(mobile, password)
+              .catch((reason: unknown) =>
                 setError(
                   reason instanceof Error
                     ? reason.message
-                    : "Unable to sign in",
+                    : "Invalid mobile number or password.",
                 ),
-              );
-            }}
-          >
-            <label>
-              Mobile number
-              <input
-                autoFocus
-                value={mobile}
-                onChange={(e) => setMobile(e.target.value)}
-                placeholder="+91 93618 67771"
-                inputMode="tel"
-                pattern="(?:\+?91[\s-]*)?[6-9](?:[\s-]*\d){9}"
-                required
-              />
-            </label>
-            <label>
-              Password
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter password"
-                required
-              />
-            </label>
-            <button className="button blue" type="submit">
-              Sign in to dashboard ↗
-            </button>
-            <button
-              className="plain-button"
-              type="button"
-              onClick={() => setResetMode(true)}
-            >
-              Forgot password?
-            </button>
-          </form>
-        )}
+              )
+              .finally(() => setLoading(false));
+          }}
+        >
+          <label>
+            Mobile number
+            <input
+              autoFocus
+              value={mobile}
+              onChange={(e) => setMobile(e.target.value)}
+              placeholder="+91 93618 67771"
+              inputMode="tel"
+              pattern="(?:\+?91[\s-]*)?[6-9](?:[\s-]*\d){9}"
+              required
+            />
+          </label>
+          <label>
+            Password
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Enter password"
+              required
+            />
+          </label>
+          <button className="button blue" type="submit" disabled={loading}>
+            {loading ? "Logging in..." : "Login"}
+          </button>
+        </form>
         {error && <small className="warning">{error}</small>}
-        {notice && <small>{notice}</small>}
-        <small>
-          Use the admin credentials configured in the API environment.
-        </small>
+        <small>Use the admin credentials configured in the API environment.</small>
       </div>
     </main>
   );
@@ -3110,7 +2996,7 @@ function CustomerCheckout({
   );
 }
 async function customerAuth(
-  path: "login",
+  path: "login" | "register",
   body: Record<string, string>,
 ): Promise<{ token: string; user: Customer }> {
   const response = await fetch(`/api/auth/${path}`, {
@@ -3120,18 +3006,6 @@ async function customerAuth(
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "Unable to sign in");
-  return result;
-}
-async function requestCustomerOtp(mobile: string): Promise<{ challengeId?: string; verified?: boolean; devOtp?: string; message: string }> {
-  const response = await fetch("/api/auth/request-customer-otp", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mobile }) });
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "Unable to send OTP");
-  return result;
-}
-async function verifyCustomerOtp(body: Record<string, string>): Promise<{ token: string; user: Customer }> {
-  const response = await fetch("/api/auth/verify-customer-otp", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || "Unable to verify mobile number");
   return result;
 }
 function CustomerLogin({
@@ -3145,28 +3019,19 @@ function CustomerLogin({
   const [name, setName] = useState("");
   const [mobile, setMobile] = useState("");
   const [password, setPassword] = useState("");
-  const [otp, setOtp] = useState("");
-  const [challengeId, setChallengeId] = useState("");
-  const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError("");
-    setNotice("");
     setLoading(true);
     try {
-      if (!register) onLogin(await customerAuth("login", { mobile, password }));
-      else if (!challengeId) {
-        const result = await requestCustomerOtp(mobile);
-        if (result.verified) {
-          setRegister(false);
-          setNotice("This number is already verified. Sign in with your mobile number and password.");
-        } else {
-          setChallengeId(result.challengeId || "");
-          setNotice(result.devOtp ? `Development OTP: ${result.devOtp}` : result.message);
-        }
-      } else onLogin(await verifyCustomerOtp({ challengeId, code: otp, name, mobile, password }));
+      if (register) {
+        const result = await customerAuth("register", { name, mobile, password });
+        onLogin(result);
+      } else {
+        onLogin(await customerAuth("login", { mobile, password }));
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to sign in");
     } finally {
@@ -3178,7 +3043,7 @@ function CustomerLogin({
       <form className="login-card" onSubmit={submit}>
         <Logo />
         <p className="eyebrow">CUSTOMER ACCOUNT</p>
-        <h1>{register ? "Verify your mobile." : "Welcome back."}</h1>
+        <h1>{register ? "Create your account." : "Welcome back."}</h1>
         {register && (
           <label>
             Full name
@@ -3211,16 +3076,9 @@ function CustomerLogin({
             required
           />
         </label>
-        {register && challengeId && (
-          <label>
-            One-time password
-            <input inputMode="numeric" pattern="\d{6}" value={otp} onChange={(event) => setOtp(event.target.value)} required />
-          </label>
-        )}
-        {notice && <p>{notice}</p>}
         {error && <p className="form-error">{error}</p>}
         <button className="button blue" type="submit" disabled={loading}>
-          {loading ? "Please wait..." : register ? challengeId ? "Verify and create account" : "Send OTP" : "Sign in"}
+          {loading ? "Please wait..." : register ? "Create account" : "Sign in"}
         </button>
         <button
           className="plain-button"

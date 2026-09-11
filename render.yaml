@@ -15,12 +15,6 @@ services:
         sync: false
       - key: ADMIN_MOBILE
         value: 9361866771
-      - key: OTP_WEBHOOK_URL
-        sync: false
-      - key: MSG91_AUTH_KEY
-        sync: false
-      - key: MSG91_TEMPLATE_ID
-        sync: false
       - key: DATABASE_PATH
         value: /var/data/catalog.sqlite
       - key: UPLOAD_DIR
