@@ -582,7 +582,7 @@ type Screen =
   | "customer-login"
   | "account"
   | "admin";
-type Customer = { id: number; name: string; email: string };
+type Customer = { id: number; name: string; email: string; mobile: string };
 type Address = {
   id: number;
   type: string;
@@ -3042,7 +3042,7 @@ function CustomerCheckout({
       `Hello Murugesan Electrical and Hardwares, I have placed an order.`,
       `Order: ${order.orderNumber}`,
       `Customer: ${customer?.name || address.fullName}`,
-      `Email: ${customer?.email || "Not provided"}`,
+      `Mobile: ${customer?.mobile || address.phone}`,
       `Phone: ${address.phone}`,
       `Delivery address: ${address.addressLine1}, ${address.area}, ${address.city}, ${address.state} - ${address.pincode}`,
       "",
@@ -3110,7 +3110,7 @@ function CustomerCheckout({
   );
 }
 async function customerAuth(
-  path: "login" | "register",
+  path: "login",
   body: Record<string, string>,
 ): Promise<{ token: string; user: Customer }> {
   const response = await fetch(`/api/auth/${path}`, {
@@ -3122,6 +3122,18 @@ async function customerAuth(
   if (!response.ok) throw new Error(result.error || "Unable to sign in");
   return result;
 }
+async function requestCustomerOtp(mobile: string): Promise<{ challengeId?: string; verified?: boolean; devOtp?: string; message: string }> {
+  const response = await fetch("/api/auth/request-customer-otp", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mobile }) });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || "Unable to send OTP");
+  return result;
+}
+async function verifyCustomerOtp(body: Record<string, string>): Promise<{ token: string; user: Customer }> {
+  const response = await fetch("/api/auth/verify-customer-otp", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || "Unable to verify mobile number");
+  return result;
+}
 function CustomerLogin({
   onLogin,
   onAdmin,
@@ -3131,21 +3143,34 @@ function CustomerLogin({
 }) {
   const [register, setRegister] = useState(false);
   const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
+  const [mobile, setMobile] = useState("");
   const [password, setPassword] = useState("");
+  const [otp, setOtp] = useState("");
+  const [challengeId, setChallengeId] = useState("");
+  const [notice, setNotice] = useState("");
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError("");
+    setNotice("");
+    setLoading(true);
     try {
-      onLogin(
-        await customerAuth(
-          register ? "register" : "login",
-          register ? { name, email, password } : { email, password },
-        ),
-      );
+      if (!register) onLogin(await customerAuth("login", { mobile, password }));
+      else if (!challengeId) {
+        const result = await requestCustomerOtp(mobile);
+        if (result.verified) {
+          setRegister(false);
+          setNotice("This number is already verified. Sign in with your mobile number and password.");
+        } else {
+          setChallengeId(result.challengeId || "");
+          setNotice(result.devOtp ? `Development OTP: ${result.devOtp}` : result.message);
+        }
+      } else onLogin(await verifyCustomerOtp({ challengeId, code: otp, name, mobile, password }));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Unable to sign in");
+    } finally {
+      setLoading(false);
     }
   };
   return (
@@ -3153,7 +3178,7 @@ function CustomerLogin({
       <form className="login-card" onSubmit={submit}>
         <Logo />
         <p className="eyebrow">CUSTOMER ACCOUNT</p>
-        <h1>{register ? "Create account." : "Welcome back."}</h1>
+        <h1>{register ? "Verify your mobile." : "Welcome back."}</h1>
         {register && (
           <label>
             Full name
@@ -3165,11 +3190,14 @@ function CustomerLogin({
           </label>
         )}
         <label>
-          Email
+          Mobile number
           <input
-            type="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
+            type="tel"
+            inputMode="tel"
+            pattern="(?:\+?91\s*)?[6-9]\d{9}"
+            value={mobile}
+            onChange={(event) => setMobile(event.target.value)}
+            placeholder="+91 93618 67771"
             required
           />
         </label>
@@ -3183,9 +3211,16 @@ function CustomerLogin({
             required
           />
         </label>
+        {register && challengeId && (
+          <label>
+            One-time password
+            <input inputMode="numeric" pattern="\d{6}" value={otp} onChange={(event) => setOtp(event.target.value)} required />
+          </label>
+        )}
+        {notice && <p>{notice}</p>}
         {error && <p className="form-error">{error}</p>}
-        <button className="button blue" type="submit">
-          {register ? "Create account" : "Sign in"}
+        <button className="button blue" type="submit" disabled={loading}>
+          {loading ? "Please wait..." : register ? challengeId ? "Verify and create account" : "Send OTP" : "Sign in"}
         </button>
         <button
           className="plain-button"
@@ -3285,7 +3320,7 @@ function Account({
       <div className="page-heading">
         <p className="eyebrow">MY ACCOUNT</p>
         <h1>{customer?.name || "Customer"}</h1>
-        <p>{customer?.email}</p>
+        <p>{customer?.mobile}</p>
       </div>
       <section className="customer-section">
         <div className="section-heading">
@@ -3471,7 +3506,7 @@ function ProfileEditor({
       </label>
       <label>
         Email
-        <input value={customer?.email || ""} readOnly />
+        <input value={customer?.mobile || ""} readOnly />
       </label>
       <button className="button blue">Save changes</button>
     </form>
