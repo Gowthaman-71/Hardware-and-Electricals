@@ -112,10 +112,9 @@ const resetCodes = new Map();
 const customerOtpChallenges = new Map();
 const mobilePattern = /^[6-9]\d{9}$/;
 const issueCustomerOtp = async (mobile, code) => {
-  if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_NUMBER) {
-    const body = new URLSearchParams({ To: `+91${mobile}`, From: process.env.TWILIO_FROM_NUMBER, Body: `Your Murugesan verification code is ${code}. It expires in 10 minutes.` });
-    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${process.env.TWILIO_ACCOUNT_SID}/Messages.json`, { method: 'POST', headers: { Authorization: `Basic ${Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64')}`, 'Content-Type': 'application/x-www-form-urlencoded' }, body });
-    if (!response.ok) throw new Error('Twilio rejected the OTP request');
+  if (process.env.MSG91_AUTH_KEY && process.env.MSG91_TEMPLATE_ID) {
+    const response = await fetch('https://control.msg91.com/api/v5/otp', { method: 'POST', headers: { authkey: process.env.MSG91_AUTH_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ template_id: process.env.MSG91_TEMPLATE_ID, mobile: `91${mobile}`, otp: code }) });
+    if (!response.ok) throw new Error('MSG91 rejected the OTP request');
     return false;
   }
   if (process.env.OTP_WEBHOOK_URL) {
