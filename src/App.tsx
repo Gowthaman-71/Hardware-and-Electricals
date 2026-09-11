@@ -588,6 +588,7 @@ type Address = {
   type: string;
   fullName: string;
   phone: string;
+  gstNumber?: string | null;
   addressLine1: string;
   addressLine2: string;
   area: string;
@@ -603,6 +604,7 @@ type CustomerOrder = {
   customerName?: string;
   customerEmail?: string;
   customerPhone?: string;
+  gstNumber?: string | null;
   items: {
     productId?: number;
     productName?: string;
@@ -2485,6 +2487,7 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
                 <p><strong>Customer:</strong> {order.customerName}</p>
                 <p><strong>Email:</strong> {order.customerEmail || "N/A"}</p>
                 <p><strong>Phone:</strong> {order.customerPhone || "N/A"}</p>
+                {order.gstNumber && <p><strong>GST:</strong> {order.gstNumber}</p>}
                 <p><strong>Address:</strong> {typeof order.deliveryAddress === "object" && order.deliveryAddress ? Object.values(order.deliveryAddress).filter(Boolean).join(", ") : "N/A"}</p>
                 <ul>
                   {order.items.map((item, index) => (
@@ -2995,6 +2998,7 @@ function CustomerCheckout({
 }) {
   const [addresses, setAddresses] = useState<Address[]>([]);
   const [selected, setSelected] = useState("");
+  const [gstNumber, setGstNumber] = useState("");
   const [message, setMessage] = useState("");
   useEffect(() => {
     fetch("/api/me/addresses", {
@@ -3003,13 +3007,10 @@ function CustomerCheckout({
       .then((response) => (response.ok ? response.json() : []))
       .then((value: Address[]) => {
         setAddresses(value);
-        setSelected(
-          String(
-            value.find((address) => address.isDefault)?.id ||
-              value[0]?.id ||
-              "",
-          ),
-        );
+        const defaultAddress = value.find((address) => address.isDefault) || value[0];
+        const nextSelected = String(defaultAddress?.id || "");
+        setSelected(nextSelected);
+        setGstNumber(defaultAddress?.gstNumber || "");
       });
   }, [token]);
   const placeOrder = async () => {
@@ -3022,6 +3023,11 @@ function CustomerCheckout({
       setMessage("Please select a delivery address");
       return;
     }
+    const normalizedGst = (gstNumber || address.gstNumber || "").trim().toUpperCase().replace(/\s+/g, "");
+    if (normalizedGst && !/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z0-9]{1}[A-Z0-9]{1}Z[A-Z0-9]{1}$/.test(normalizedGst)) {
+      setMessage("Please enter a valid GST number.");
+      return;
+    }
     const response = await fetch("/api/me/orders", {
       method: "POST",
       headers: {
@@ -3030,6 +3036,7 @@ function CustomerCheckout({
       },
       body: JSON.stringify({
         addressId: selected,
+        gstNumber: normalizedGst || undefined,
         items: items.map(({ product, quantity }) => ({
           productId: product.id,
           name: product.name,
@@ -3039,7 +3046,8 @@ function CustomerCheckout({
       }),
     });
     if (!response.ok) {
-      setMessage("Unable to place the order. Please try again.");
+      const result = await response.json().catch(() => ({}));
+      setMessage(result.error || "Unable to place the order. Please try again.");
       return;
     }
     const order = (await response.json()) as CustomerOrder;
@@ -3048,7 +3056,6 @@ function CustomerCheckout({
       `Order: ${order.orderNumber}`,
       `Customer: ${customer?.name || address.fullName}`,
       `Mobile: ${customer?.mobile || address.phone}`,
-      `Phone: ${address.phone}`,
       `Delivery address: ${address.addressLine1}, ${address.area}, ${address.city}, ${address.state} - ${address.pincode}`,
       "",
       "Items:",
@@ -3065,6 +3072,7 @@ function CustomerCheckout({
     setMessage("Order placed successfully");
     onComplete();
   };
+
   return (
     <section className="customer-checkout page">
       <p className="eyebrow">CHECKOUT</p>
@@ -3077,7 +3085,10 @@ function CustomerCheckout({
                 type="radio"
                 name="delivery"
                 checked={selected === String(address.id)}
-                onChange={() => setSelected(String(address.id))}
+                onChange={() => {
+                  setSelected(String(address.id));
+                  setGstNumber(address.gstNumber || "");
+                }}
               />
               <span>
                 <strong>
@@ -3092,6 +3103,15 @@ function CustomerCheckout({
               </span>
             </label>
           ))}
+          <label>
+            GST Number (optional)
+            <input
+              type="text"
+              value={gstNumber}
+              onChange={(event) => setGstNumber(event.target.value)}
+              placeholder="22AAAAA0000A1Z5"
+            />
+          </label>
           <button
             className="button blue"
             onClick={() => void placeOrder()}
@@ -3254,6 +3274,7 @@ function Account({
         payload.fullName ?? payload.full_name ?? customer?.name ?? "",
       ).trim(),
       phone: String(payload.phone ?? "").trim(),
+      gstNumber: String(payload.gstNumber ?? "").trim(),
       addressLine1: String(
         payload.addressLine1 ?? payload.address_line1 ?? "",
       ).trim(),
@@ -3408,6 +3429,14 @@ function Account({
               </label>
             ))}
             <label>
+              GST Number (optional)
+              <input
+                name="gstNumber"
+                defaultValue={editing.gstNumber || ""}
+                placeholder="22AAAAA0000A1Z5"
+              />
+            </label>
+            <label>
               <input
                 name="isDefault"
                 type="checkbox"
@@ -3445,7 +3474,7 @@ function Account({
                 <button
                   className="plain-button"
                   type="button"
-                  onClick={() => window.alert(`${order.orderNumber}\n\n${order.items.map((item) => `${item.productName || item.name || "Item"} × ${item.quantity}`).join("\n")}\n\nTotal: ${money(order.total)}`)}
+                  onClick={() => window.alert(`${order.orderNumber}\n\n${order.items.map((item) => `${item.productName || item.name || "Item"} × ${item.quantity}`).join("\n")}\n\n${order.gstNumber ? `GST: ${order.gstNumber}\n` : ""}Total: ${money(order.total)}`)}
                 >
                   View details
                 </button>
@@ -3469,7 +3498,9 @@ function ProfileEditor({
   setCustomer: (customer: Customer) => void;
 }) {
   const [name, setName] = useState(customer?.name || "");
-  useEffect(() => setName(customer?.name || ""), [customer?.name]);
+  useEffect(() => {
+    setName(customer?.name || "");
+  }, [customer?.name]);
   return (
     <form
       className="profile-form"
@@ -3483,7 +3514,13 @@ function ProfileEditor({
           },
           body: JSON.stringify({ name }),
         });
-        if (response.ok) setCustomer(await response.json());
+        if (response.ok) {
+          const updated = (await response.json()) as Customer;
+          setCustomer(updated);
+          return;
+        }
+        const result = await response.json().catch(() => ({}));
+        window.alert(result.error || "Unable to update profile");
       }}
     >
       <label>
@@ -3495,7 +3532,7 @@ function ProfileEditor({
         />
       </label>
       <label>
-        Email
+        Mobile number
         <input value={customer?.mobile || ""} readOnly />
       </label>
       <button className="button blue">Save changes</button>
