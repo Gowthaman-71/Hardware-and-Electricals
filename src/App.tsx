@@ -629,8 +629,32 @@ type CustomerOrder = {
   paymentStatus?: string;
   paymentMethod?: string;
   deliveryAddress: Address | Record<string, unknown>;
+  statusHistory?: {
+    id: number;
+    status: string;
+    changedBy?: number | null;
+    createdAt: string;
+    note?: string;
+  }[];
   createdAt: string;
   itemCount?: number;
+};
+const orderStatusTimeline = [
+  "PENDING",
+  "CONFIRMED",
+  "PROCESSING",
+  "OUT_FOR_DELIVERY",
+  "DELIVERED",
+] as const;
+const orderStatusIndex = (status: string) =>
+  orderStatusTimeline.indexOf(status as (typeof orderStatusTimeline)[number]);
+const nextOrderStatuses: Record<string, string[]> = {
+  PENDING: ["CONFIRMED", "CANCELLED"],
+  CONFIRMED: ["PROCESSING", "CANCELLED"],
+  PROCESSING: ["OUT_FOR_DELIVERY", "CANCELLED"],
+  OUT_FOR_DELIVERY: ["DELIVERED"],
+  DELIVERED: [],
+  CANCELLED: [],
 };
 const formatOrderStatus = (status: string) => {
   const value = String(status || "PENDING").trim().toUpperCase();
@@ -638,12 +662,19 @@ const formatOrderStatus = (status: string) => {
     PENDING: "Pending",
     CONFIRMED: "Confirmed",
     PROCESSING: "Processing",
-    SHIPPED: "Shipped",
     OUT_FOR_DELIVERY: "Out for Delivery",
     DELIVERED: "Delivered",
     CANCELLED: "Cancelled",
   };
   return map[value] || value.replace(/_/g, " ");
+};
+const orderAddressText = (value: Address | Record<string, unknown>) => {
+  const address = value && typeof value === "object" ? value : {};
+  const parts = ["addressLine1", "area", "city", "state"]
+    .map((key) => String(address[key as keyof typeof address] || "").trim())
+    .filter(Boolean);
+  const pincode = String(address.pincode || "").trim();
+  return pincode ? `${parts.join(", ")}${parts.length ? " - " : ""}${pincode}` : parts.join(", ");
 };
 const logoPath = "/assets/logo/murugesan-logo.png";
 const fallbackImage =
@@ -2486,6 +2517,20 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
     );
     notify("Order status updated");
   };
+  const notifyCustomer = async (order: CustomerOrder) => {
+    const response = await fetch(`/api/orders/${order.id}/notify`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiToken}` },
+    });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      notify(result.error || "Customer notification could not be prepared.");
+      return;
+    }
+    const result = (await response.json()) as { url: string };
+    window.open(result.url, "_blank");
+    notify("WhatsApp notification prepared");
+  };
   return (
     <section className="panel">
       <div className="panel-heading">
@@ -2509,7 +2554,6 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
             "PENDING",
             "CONFIRMED",
             "PROCESSING",
-            "SHIPPED",
             "OUT_FOR_DELIVERY",
             "DELIVERED",
             "CANCELLED",
@@ -2548,25 +2592,21 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
               <button className="plain-button" type="button" onClick={() => setExpandedId(expandedId === order.id ? null : order.id)}>
                 {expandedId === order.id ? "Hide details" : "View details"}
               </button>
-              <select
-                value={order.status}
-                onChange={(event) => void updateStatus(order.id, event.target.value)}
-                aria-label={`Update status for ${order.orderNumber}`}
-              >
-                {[
-                  "PENDING",
-                  "CONFIRMED",
-                  "PROCESSING",
-                  "SHIPPED",
-                  "OUT_FOR_DELIVERY",
-                  "DELIVERED",
-                  "CANCELLED",
-                ].map((status) => (
-                  <option value={status} key={status}>
-                    {formatOrderStatus(status)}
-                  </option>
-                ))}
-              </select>
+              {(nextOrderStatuses[order.status] || []).map((status) => (
+                <button
+                  className="plain-button"
+                  type="button"
+                  key={status}
+                  onClick={() => void updateStatus(order.id, status)}
+                >
+                  {status === "CANCELLED" ? "Cancel Order" : `Mark ${formatOrderStatus(status)}`}
+                </button>
+              ))}
+              {order.status !== "PENDING" && order.status !== "DELIVERED" && order.status !== "CANCELLED" && (
+                <button className="plain-button" type="button" onClick={() => void notifyCustomer(order)}>
+                  Notify Customer on WhatsApp
+                </button>
+              )}
             </div>
             {expandedId === order.id && (
               <div style={{ marginTop: 16 }}>
@@ -2574,7 +2614,7 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
                 <p><strong>Email:</strong> {order.customerEmail || "N/A"}</p>
                 <p><strong>Phone:</strong> {order.customerPhone || "N/A"}</p>
                 {order.gstNumber && <p><strong>GST:</strong> {order.gstNumber}</p>}
-                <p><strong>Address:</strong> {typeof order.deliveryAddress === "object" && order.deliveryAddress ? Object.values(order.deliveryAddress).filter(Boolean).join(", ") : "N/A"}</p>
+                <p><strong>Address:</strong> {orderAddressText(order.deliveryAddress) || "N/A"}</p>
                 <ul>
                   {order.items.map((item, index) => (
                     <li key={`${order.id}-${index}`}>
@@ -2582,6 +2622,17 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
                     </li>
                   ))}
                 </ul>
+                {order.statusHistory?.length ? (
+                  <div>
+                    <strong>Status history</strong>
+                    {order.statusHistory.map((history) => (
+                      <p key={history.id}>
+                        {formatOrderStatus(history.status)} · {new Date(history.createdAt).toLocaleString()}
+                        {history.note ? ` · ${history.note}` : ""}
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             )}
           </div>
@@ -3607,6 +3658,30 @@ function Account({
                   View details
                 </button>
               </div>
+              {order.status === "CANCELLED" ? (
+                <p style={{ marginTop: 12 }}><strong>Order Cancelled</strong></p>
+              ) : (
+                <div style={{ marginTop: 12 }}>
+                  <strong>Status timeline</strong>
+                  {orderStatusTimeline.map((status, index) => {
+                    const currentIndex = orderStatusIndex(order.status);
+                    return (
+                      <p key={status} style={{ margin: "5px 0", opacity: index <= currentIndex ? 1 : 0.5 }}>
+                        {index <= currentIndex ? "✓" : "○"} {formatOrderStatus(status)}
+                      </p>
+                    );
+                  })}
+                </div>
+              )}
+              <p style={{ marginTop: 12 }}><strong>Current status:</strong> {formatOrderStatus(order.status)}</p>
+              <p><strong>Delivery address:</strong> {orderAddressText(order.deliveryAddress) || "Not provided"}</p>
+              <ul>
+                {order.items.map((item, index) => (
+                  <li key={`${order.id}-item-${index}`}>
+                    {item.productName || item.name || "Item"} × {item.quantity} · {money(item.unitPrice ?? item.price)}
+                  </li>
+                ))}
+              </ul>
             </div>
           ))
         ) : (

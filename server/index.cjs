@@ -226,6 +226,23 @@ const runProductionSchemaSetup = () => {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`,
+    `CREATE TABLE IF NOT EXISTS order_status_history (
+      id SERIAL PRIMARY KEY,
+      order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK (status IN ('PENDING', 'CONFIRMED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED')),
+      changed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      note TEXT NOT NULL DEFAULT ''
+    )`,
+    `CREATE TABLE IF NOT EXISTS order_notifications (
+      id SERIAL PRIMARY KEY,
+      order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      customer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      type TEXT NOT NULL,
+      channel TEXT NOT NULL CHECK (channel = 'WHATSAPP'),
+      message TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
     `CREATE TABLE IF NOT EXISTS settings (
       id SERIAL PRIMARY KEY,
       key TEXT NOT NULL UNIQUE,
@@ -249,6 +266,8 @@ const runProductionSchemaSetup = () => {
     `CREATE INDEX IF NOT EXISTS idx_orders_customer_created ON orders(customer_id, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders(status, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id, product_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_order_status_history_order ON order_status_history(order_id, created_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_order_notifications_order ON order_notifications(order_id, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id)`,
     `CREATE INDEX IF NOT EXISTS idx_categories_status_order ON categories(status, sort_order)`,
     `CREATE INDEX IF NOT EXISTS idx_brands_status ON brands(status)`,
@@ -268,7 +287,7 @@ const runProductionSchemaSetup = () => {
 };
 const syncPostgresSequences = () => {
   if (!isProduction) return;
-  const tables = ['users', 'addresses', 'categories', 'brands', 'product_types', 'attributes', 'products', 'orders', 'order_items', 'settings', 'import_jobs'];
+  const tables = ['users', 'addresses', 'categories', 'brands', 'product_types', 'attributes', 'products', 'orders', 'order_items', 'order_status_history', 'order_notifications', 'settings', 'import_jobs'];
   for (const tableName of tables) {
     try {
       db.exec(`SELECT setval(pg_get_serial_sequence('${tableName}', 'id'), COALESCE((SELECT MAX(id) FROM ${tableName}) + 1, 1), false) WHERE EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = '${tableName}' AND column_name = 'id');`);
@@ -298,24 +317,61 @@ const normalizeWhatsappNumber = (value) => {
 };
 const slugify = (value) => value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 const safeJson = (value, fallback) => { try { return JSON.parse(value); } catch { return fallback; } };
+const validOrderStatuses = new Set(['PENDING', 'CONFIRMED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED']);
+const allowedOrderTransitions = {
+  PENDING: new Set(['CONFIRMED', 'CANCELLED']),
+  CONFIRMED: new Set(['PROCESSING', 'CANCELLED']),
+  PROCESSING: new Set(['OUT_FOR_DELIVERY', 'CANCELLED']),
+  OUT_FOR_DELIVERY: new Set(['DELIVERED']),
+  DELIVERED: new Set(),
+  CANCELLED: new Set(),
+};
+const notificationTypeForStatus = {
+  CONFIRMED: 'ORDER_CONFIRMED',
+  PROCESSING: 'ORDER_PROCESSING',
+  OUT_FOR_DELIVERY: 'ORDER_OUT_FOR_DELIVERY',
+  DELIVERED: 'ORDER_DELIVERED',
+  CANCELLED: 'ORDER_CANCELLED',
+};
 const normalizeOrderStatus = (value) => {
   const normalized = String(value || 'PENDING').trim().toUpperCase().replace(/\s+/g, '_');
-  const allowed = new Set(['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED']);
-  return allowed.has(normalized) ? normalized : 'PENDING';
+  const allowed = new Set(['PENDING', 'CONFIRMED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED']);
+  return allowed.has(normalized) ? normalized : null;
 };
 const formatOrderStatusLabel = (value) => {
   const labelMap = {
     PENDING: 'Pending',
     CONFIRMED: 'Confirmed',
     PROCESSING: 'Processing',
-    SHIPPED: 'Shipped',
     OUT_FOR_DELIVERY: 'Out for Delivery',
     DELIVERED: 'Delivered',
     CANCELLED: 'Cancelled',
   };
-  return labelMap[normalizeOrderStatus(value)] || 'Pending';
+  return labelMap[normalizeOrderStatus(value) || 'PENDING'] || 'Pending';
 };
 const businessWhatsappNumber = normalizeWhatsappNumber(process.env.BUSINESS_WHATSAPP_NUMBER || process.env.OWNER_WHATSAPP_NUMBER || '+919361866771');
+const formatCurrency = (value) => `₹${Number(value || 0).toLocaleString('en-IN')}`;
+const formatOrderAddress = (value) => {
+  const address = value && typeof value === 'object' ? value : {};
+  const parts = [address.addressLine1, address.area, address.city, address.state]
+    .map((part) => String(part || '').trim())
+    .filter(Boolean);
+  const pincode = String(address.pincode || '').trim();
+  return pincode ? `${parts.join(', ')}${parts.length ? ' - ' : ''}${pincode}` : parts.join(', ');
+};
+const buildOrderNotificationMessage = (order, status) => {
+  const name = String(order.customer_name || 'Customer').trim() || 'Customer';
+  const orderNumber = String(order.order_number || '').trim();
+  const total = formatCurrency(order.total);
+  const messages = {
+    CONFIRMED: `Hello ${name},\n\nYour order ${orderNumber} has been confirmed by Murugesan Electrical and Hardwares.\n\nOrder Total: ${total}\n\nStatus: CONFIRMED\n\nThank you.`,
+    PROCESSING: `Hello ${name},\n\nYour order ${orderNumber} is now being processed.\n\nStatus: PROCESSING`,
+    OUT_FOR_DELIVERY: `Hello ${name},\n\nYour order ${orderNumber} is out for delivery.\n\nStatus: OUT_FOR_DELIVERY`,
+    DELIVERED: `Hello ${name},\n\nYour order ${orderNumber} has been delivered successfully.\n\nStatus: DELIVERED`,
+    CANCELLED: `Hello ${name},\n\nYour order ${orderNumber} has been cancelled.\n\nPlease contact Murugesan Electrical and Hardwares if you need assistance.`,
+  };
+  return messages[status] || '';
+};
 
 const productSelect = `
   SELECT p.*, c.name AS category_name, c.slug AS category_slug, c.status AS category_status,
@@ -434,6 +490,7 @@ const mapOrder = (row) => row ? {
   deliveryAddress: safeJson(row.delivery_address_json, {}),
   idempotencyKey: row.idempotency_key || null,
   notificationStatus: row.notification_status || 'PENDING',
+  statusHistory: db.prepare('SELECT id, status, changed_by AS changedBy, created_at AS createdAt, note FROM order_status_history WHERE order_id = ? ORDER BY created_at, id').all(row.id).map((history) => ({ ...history, status: normalizeOrderStatus(history.status) || 'PENDING' })),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 } : null;
@@ -495,6 +552,17 @@ function applyDatabaseMigrations() {
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_order_number ON orders(order_number) WHERE order_number IS NOT NULL');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idempotency_key ON orders(idempotency_key) WHERE idempotency_key IS NOT NULL');
 }
+function migrateOrderStatusData() {
+  db.prepare("UPDATE orders SET status = 'OUT_FOR_DELIVERY', updated_at = ? WHERE status = 'SHIPPED'").run(now());
+  db.exec(`
+    INSERT INTO order_status_history (order_id, status, changed_by, created_at, note)
+    SELECT o.id, o.status, NULL, o.created_at, 'Initial order status'
+    FROM orders o
+    WHERE NOT EXISTS (
+      SELECT 1 FROM order_status_history h WHERE h.order_id = o.id
+    )
+  `);
+}
 function ensureCoreAdminAccount() {
   const adminEmail = String(process.env.ADMIN_EMAIL || 'owner@murugesan.in').trim().toLowerCase();
   const adminMobile = normalizeMobile(process.env.ADMIN_MOBILE || '9361866771');
@@ -545,6 +613,7 @@ function seedDemoData() {
 }
 backupDatabaseIfNeeded();
 applyDatabaseMigrations();
+migrateOrderStatusData();
 if (isProduction) {
   syncPostgresSequences();
 }
@@ -639,7 +708,64 @@ app.delete('/api/me/addresses/:id', auth, (req, res) => { if (req.user.role !== 
 app.get('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const rows = db.prepare('SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC').all(req.user.id).map(mapOrder); res.json(rows); });
 app.get('/api/orders/:id', auth, (req, res) => { const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id)); if (!order) return res.status(404).json({ error: 'Order not found' }); const mapped = mapOrder(order); if (req.user.role === 'ADMIN' || Number(req.user.id) === Number(order.customer_id)) return res.json(mapped); return res.status(403).json({ error: 'You do not have access to this order' }); });
 app.get('/api/admin/orders', auth, admin, (_req, res) => { const rows = db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all().map(mapOrder); res.json(rows); });
-app.patch('/api/admin/orders/:id/status', auth, admin, (req, res) => { const status = normalizeOrderStatus(req.body?.status); const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id)); if (!order) return res.status(404).json({ error: 'Order not found' }); const result = db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(status, now(), Number(req.params.id)); if (!result.changes) return res.status(400).json({ error: 'Unable to update order status' }); res.json(mapOrder(db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id)))); });
+app.patch('/api/admin/orders/:id/status', auth, admin, (req, res) => {
+  const orderId = Number(req.params.id);
+  const requestedStatus = normalizeOrderStatus(req.body?.status);
+  if (!Number.isInteger(orderId) || orderId <= 0) return res.status(400).json({ error: 'Invalid order ID' });
+  if (!requestedStatus) return res.status(400).json({ error: 'Invalid order status' });
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const lockClause = isProduction ? ' FOR UPDATE' : '';
+    const order = db.prepare(`SELECT * FROM orders WHERE id = ?${lockClause}`).get(orderId);
+    if (!order) {
+      db.exec('ROLLBACK');
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    const currentStatus = normalizeOrderStatus(order.status);
+    if (!currentStatus || !allowedOrderTransitions[currentStatus]?.has(requestedStatus)) {
+      db.exec('ROLLBACK');
+      return res.status(409).json({ error: `Invalid order status transition: ${currentStatus || 'UNKNOWN'} to ${requestedStatus}` });
+    }
+    const timestamp = now();
+    const note = String(req.body?.note || '').trim().slice(0, 500);
+    db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(requestedStatus, timestamp, orderId);
+    db.prepare('INSERT INTO order_status_history (order_id,status,changed_by,created_at,note) VALUES (?,?,?,?,?)').run(orderId, requestedStatus, req.user.id, timestamp, note);
+    db.exec('COMMIT');
+    res.json(mapOrder(db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId)));
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* transaction already closed */ }
+    console.error('[api/admin/orders/:id/status]', error && error.stack ? error.stack : error);
+    res.status(500).json({ error: 'Unable to update order status' });
+  }
+});
+app.get('/api/orders/:id/status-history', auth, (req, res) => {
+  const orderId = Number(req.params.id);
+  const order = db.prepare('SELECT customer_id FROM orders WHERE id = ?').get(orderId);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (req.user.role !== 'ADMIN' && Number(req.user.id) !== Number(order.customer_id)) return res.status(403).json({ error: 'You do not have access to this order' });
+  res.json(db.prepare('SELECT id, status, changed_by AS changedBy, created_at AS createdAt, note FROM order_status_history WHERE order_id = ? ORDER BY created_at, id').all(orderId).map((row) => ({ ...row, status: normalizeOrderStatus(row.status) || 'PENDING' })));
+});
+app.post('/api/orders/:id/notify', auth, admin, (req, res) => {
+  const orderId = Number(req.params.id);
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  const status = normalizeOrderStatus(order.status);
+  const message = buildOrderNotificationMessage(order, status);
+  const notificationType = notificationTypeForStatus[status];
+  if (!message || !notificationType) return res.status(400).json({ error: 'Customer notification is not available for this order status' });
+  const user = db.prepare('SELECT mobile_number FROM users WHERE id = ? AND role = ?').get(order.customer_id, 'CUSTOMER');
+  const destination = normalizeWhatsappNumber(user?.mobile_number || order.customer_phone);
+  if (!destination) return res.status(400).json({ error: 'Customer phone number is unavailable' });
+  const result = db.prepare('INSERT INTO order_notifications (order_id,customer_id,type,channel,message,created_at) VALUES (?,?,?,?,?,?)').run(order.id, order.customer_id, notificationType, 'WHATSAPP', message, now());
+  res.json({
+    notificationId: Number(result.lastInsertRowid),
+    channel: 'WHATSAPP',
+    destination: destination.replace(/\D/g, ''),
+    message,
+    url: `https://wa.me/${destination.replace(/\D/g, '')}?text=${encodeURIComponent(message)}`,
+  });
+});
 app.get('/api/admin/customers', auth, admin, (_req, res) => {
   const rows = db.prepare(`
     SELECT u.id, u.name, u.email, u.mobile_number, u.status, u.created_at, u.last_login_at,
@@ -715,6 +841,7 @@ app.post('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER
     for (const item of snapshotItems) {
       orderItemInsert.run(orderId, item.productId, item.productName, item.productImage, item.quantity, item.unitPrice, item.totalPrice, timestamp, timestamp);
     }
+    db.prepare('INSERT INTO order_status_history (order_id,status,changed_by,created_at,note) VALUES (?,?,?,?,?)').run(orderId, 'PENDING', req.user.id, timestamp, 'Order placed');
 
     for (const item of snapshotItems) {
       const stockResult = db.prepare('UPDATE products SET stock = stock - ?, updated_at = ? WHERE id = ? AND stock >= ?').run(item.quantity, now(), item.productId, item.quantity);
