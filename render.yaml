@@ -28,7 +28,7 @@ services:
       - key: WHATSAPP_API_VERSION
         value: v23.0
       - key: WHATSAPP_OWNER_NUMBER
-        sync: false
+        value: 919361866771
       - key: WHATSAPP_NEW_ORDER_TEMPLATE
         sync: false
       - key: WHATSAPP_ORDER_CONFIRMED_TEMPLATE
