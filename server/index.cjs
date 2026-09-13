@@ -8,20 +8,23 @@ const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
 const root = path.resolve(__dirname, '..');
-for (const envFile of ['.env', '.env.example']) {
-  const envPath = path.join(root, envFile);
-  if (!fs.existsSync(envPath)) continue;
-  for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+const runtimeEnvPath = path.join(root, '.env');
+if (fs.existsSync(runtimeEnvPath)) {
+  for (const line of fs.readFileSync(runtimeEnvPath, 'utf8').split(/\r?\n/)) {
     const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
     if (match && !process.env[match[1]]) process.env[match[1]] = match[2];
   }
-  if (envFile === '.env') break;
 }
+const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER === 'true';
 const port = Number(process.env.PORT || 8787);
-const jwtSecret = process.env.JWT_SECRET || 'development-only-change-me';
-const defaultDatabasePath = process.env.DATABASE_PATH || 'server/data/catalog.sqlite';
+const jwtSecret = process.env.JWT_SECRET || (!isProduction ? 'murugesan-local-dev-secret' : null);
+if (!jwtSecret) {
+  throw new Error('JWT_SECRET is required in production.');
+}
+const defaultDatabasePath = process.env.DATABASE_PATH || (isProduction ? '/var/data/catalog.sqlite' : 'server/data/catalog.sqlite');
 let databasePath = defaultDatabasePath.startsWith('/') ? defaultDatabasePath : path.resolve(root, defaultDatabasePath);
-let uploadDirectory = path.resolve(root, process.env.UPLOAD_DIR || 'server/uploads');
+const uploadDirSetting = process.env.UPLOAD_DIR || (isProduction ? '/var/data/uploads' : 'server/uploads');
+let uploadDirectory = uploadDirSetting.startsWith('/') ? uploadDirSetting : path.resolve(root, uploadDirSetting);
 
 try {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -87,15 +90,140 @@ const formatOrderStatusLabel = (value) => {
 };
 const businessWhatsappNumber = normalizeWhatsappNumber(process.env.BUSINESS_WHATSAPP_NUMBER || process.env.OWNER_WHATSAPP_NUMBER || '+919361866771');
 
+const productSelect = `
+  SELECT p.*, c.name AS category_name, c.slug AS category_slug, c.status AS category_status,
+    b.name AS brand_name, pt.name AS product_type_name,
+    COALESCE(NULLIF(p.image_url, ''), NULL) AS image_url
+  FROM products p
+  LEFT JOIN categories c ON c.id = p.category_id
+  LEFT JOIN brands b ON b.id = p.brand_id
+  LEFT JOIN product_types pt ON pt.id = p.product_type_id
+`;
+
+const mapCategory = (row) => row ? {
+  id: Number(row.id),
+  name: String(row.name || ''),
+  slug: String(row.slug || ''),
+  parentId: row.parent_id == null ? null : Number(row.parent_id),
+  image: row.image_url || '',
+  imageUrl: row.image_url || null,
+  description: row.description || '',
+  status: row.status || 'ACTIVE',
+  sortOrder: Number(row.sort_order || 0),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+} : null;
+const mapBrand = (row) => row ? {
+  id: Number(row.id),
+  name: String(row.name || ''),
+  slug: String(row.slug || ''),
+  logoUrl: row.logo_url || null,
+  description: row.description || '',
+  status: row.status || 'ACTIVE',
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+} : null;
+const mapProductType = (row) => row ? {
+  id: Number(row.id),
+  categoryId: row.category_id == null ? null : Number(row.category_id),
+  name: String(row.name || ''),
+  status: row.status || 'ACTIVE',
+  sortOrder: Number(row.sort_order || 0),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+} : null;
+const mapAttribute = (row) => row ? {
+  id: Number(row.id),
+  categoryId: row.category_id == null ? null : Number(row.category_id),
+  name: String(row.name || ''),
+  type: String(row.type || 'Text'),
+  required: Boolean(row.required),
+  filterable: Boolean(row.filterable),
+  searchable: Boolean(row.searchable),
+  options: safeJson(row.options_json, []),
+  status: row.status || 'ACTIVE',
+  sortOrder: Number(row.sort_order || 0),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+} : null;
+const mapProduct = (row) => row ? {
+  id: Number(row.id),
+  sku: String(row.sku || ''),
+  name: String(row.name || ''),
+  category: String(row.category_name || row.category || ''),
+  categoryId: row.category_id == null ? null : Number(row.category_id),
+  brand: String(row.brand_name || row.brand || ''),
+  brandId: row.brand_id == null ? null : Number(row.brand_id),
+  productType: String(row.product_type_name || row.product_type || ''),
+  productTypeId: row.product_type_id == null ? null : Number(row.product_type_id),
+  price: Number(row.price || 0),
+  mrp: Number(row.mrp || row.price || 0),
+  discount: Number(row.discount || 0),
+  stock: Number(row.stock || 0),
+  unit: String(row.unit || 'Nos'),
+  description: row.description || '',
+  details: row.details || '',
+  image: row.image_url || '',
+  imageUrl: row.image_url || null,
+  status: row.status || 'ACTIVE',
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+  attributes: safeJson(row.attributes_json, {}),
+  imageUrls: safeJson(row.image_urls_json, []),
+} : null;
+const mapAddress = (row) => row ? {
+  id: Number(row.id),
+  customerId: Number(row.customer_id),
+  type: row.type || 'Home',
+  fullName: row.full_name || '',
+  phone: row.phone || '',
+  gstNumber: row.gst_number || null,
+  addressLine1: row.address_line1 || '',
+  addressLine2: row.address_line2 || '',
+  area: row.area || '',
+  city: row.city || '',
+  state: row.state || '',
+  pincode: row.pincode || '',
+  isDefault: Boolean(row.is_default),
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+} : null;
+const mapOrder = (row) => row ? {
+  id: Number(row.id),
+  orderNumber: row.order_number || `MH-${String(row.id).padStart(6, '0')}`,
+  customerId: Number(row.customer_id),
+  customerName: row.customer_name || '',
+  customerEmail: row.customer_email || '',
+  customerPhone: row.customer_phone || '',
+  gstNumber: row.gst_number || null,
+  items: safeJson(row.items_json, []),
+  subtotal: Number(row.subtotal || 0),
+  deliveryCharge: Number(row.delivery_charge || 0),
+  total: Number(row.total || 0),
+  status: row.status || 'PENDING',
+  paymentMethod: row.payment_method || 'Cash on Delivery',
+  paymentStatus: row.payment_status || 'PENDING',
+  deliveryAddress: safeJson(row.delivery_address_json, {}),
+  idempotencyKey: row.idempotency_key || null,
+  notificationStatus: row.notification_status || 'PENDING',
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+} : null;
+
 function ensureColumn(tableName, columnName, definitionSql) {
   const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
   if (columns.some((column) => column.name === columnName)) return;
   db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${definitionSql}`);
 }
 function backupDatabaseIfNeeded() {
-  if (!fs.existsSync(databasePath)) return;
+  if (process.env.BACKUP_DATABASE !== 'true' || !fs.existsSync(databasePath)) return;
   const backupDir = path.join(path.dirname(databasePath), '.backups');
   fs.mkdirSync(backupDir, { recursive: true });
+  const backupFiles = fs.readdirSync(backupDir).filter((file) => file.startsWith('catalog-backup-') && file.endsWith('.sqlite')).sort();
+  while (backupFiles.length > 4) {
+    const stale = path.join(backupDir, backupFiles.shift());
+    try { fs.unlinkSync(stale); } catch { /* ignore */ }
+  }
   const backupPath = path.join(backupDir, `catalog-backup-${Date.now()}.sqlite`);
   fs.copyFileSync(databasePath, backupPath);
   console.log('[database] Backup created', { backupPath });
@@ -103,6 +231,14 @@ function backupDatabaseIfNeeded() {
 function applyDatabaseMigrations() {
   const schemaSql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   db.exec(schemaSql);
+  db.exec(`CREATE TABLE IF NOT EXISTS settings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL UNIQUE,
+    value TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`);
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_settings_key ON settings(key)');
   ensureColumn('users', 'mobile_number', 'mobile_number TEXT');
   ensureColumn('users', 'last_login_at', 'last_login_at TEXT');
   ensureColumn('addresses', 'gst_number', 'gst_number TEXT');
@@ -124,24 +260,32 @@ function applyDatabaseMigrations() {
   }
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_mobile_number ON users(mobile_number) WHERE mobile_number IS NOT NULL');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_order_number ON orders(order_number) WHERE order_number IS NOT NULL');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idempotency_key ON orders(idempotency_key) WHERE idempotency_key IS NOT NULL');
 }
 function ensureCoreAdminAccount() {
   const adminEmail = String(process.env.ADMIN_EMAIL || 'owner@murugesan.in').trim().toLowerCase();
   const adminMobile = normalizeMobile(process.env.ADMIN_MOBILE || '9361866771');
   const configuredPassword = process.env.ADMIN_PASSWORD || 'change-this-before-production';
-  const existingAdmin = db.prepare('SELECT id, mobile_number FROM users WHERE email = ? AND role = ?').get(adminEmail, 'ADMIN');
-  if (existingAdmin) {
-    const duplicateMobile = db.prepare('SELECT id FROM users WHERE mobile_number = ? AND id != ?').get(adminMobile, existingAdmin.id);
-    const safeAdminMobile = adminMobile && !duplicateMobile ? adminMobile : existingAdmin.mobile_number || null;
-    db.prepare("UPDATE users SET mobile_number = ?, status = 'ACTIVE', updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(safeAdminMobile, now(), existingAdmin.id);
+  const passwordHash = bcrypt.hashSync(configuredPassword, 12);
+  const adminRows = db.prepare("SELECT id, email, mobile_number, status FROM users WHERE role = 'ADMIN' ORDER BY id").all();
+
+  if (!adminRows.length) {
+    db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').run('Store Owner', adminEmail, adminMobile, passwordHash, 'ADMIN', 'ACTIVE', now(), now());
     return;
   }
-  const existingFallback = db.prepare("SELECT id FROM users WHERE role = 'ADMIN' ORDER BY id LIMIT 1").get();
-  if (existingFallback) {
-    db.prepare('UPDATE users SET email = ?, mobile_number = ?, status = "ACTIVE", updated_at = ? WHERE id = ? AND role = "ADMIN"').run(adminEmail, adminMobile, now(), existingFallback.id);
-    return;
+
+  const primaryAdmin = adminRows[0];
+  for (const row of adminRows.slice(1)) {
+    const staleEmail = row.email && row.email !== adminEmail ? row.email : `archived-admin-${row.id}@local.invalid`;
+    db.prepare("UPDATE users SET email = ?, mobile_number = NULL, password_hash = ?, status = 'INACTIVE', updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(staleEmail, passwordHash, now(), row.id);
   }
-  db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').run('Store Owner', adminEmail, adminMobile, bcrypt.hashSync(configuredPassword, 12), 'ADMIN', 'ACTIVE', now(), now());
+
+  db.prepare("UPDATE users SET email = ?, mobile_number = ?, password_hash = ?, status = 'ACTIVE', updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(adminEmail, adminMobile, passwordHash, now(), primaryAdmin.id);
+
+  const duplicateEmail = db.prepare("SELECT id FROM users WHERE email = ? AND role = 'ADMIN' AND id != ?").get(adminEmail, primaryAdmin.id);
+  if (duplicateEmail) {
+    db.prepare("UPDATE users SET email = ?, mobile_number = NULL, status = 'INACTIVE', updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(`archived-admin-${duplicateEmail.id}@local.invalid`, now(), duplicateEmail.id);
+  }
 }
 function seedDemoData() {
   if (process.env.SEED_DEMO_DATA !== 'true') return;
@@ -176,6 +320,7 @@ seedDemoData();
 console.log('[database] Connected', { path: databasePath, seedDemoData: process.env.SEED_DEMO_DATA === 'true' });
 
 const app = express();
+console.log('[database] Configured', { path: databasePath, uploadDirectory, jwtSecretConfigured: Boolean(jwtSecret), seedDemoData: process.env.SEED_DEMO_DATA === 'true' });
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 app.use('/uploads', express.static(uploadDirectory));
@@ -225,44 +370,66 @@ app.get('/api/admin/customers', auth, admin, (_req, res) => {
   }));
   res.json(rows);
 });
-app.post('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; const address = db.prepare('SELECT * FROM addresses WHERE id = ? AND customer_id = ?').get(Number(body.addressId), req.user.id); const user = db.prepare('SELECT id,name,email,mobile_number FROM users WHERE id = ?').get(req.user.id); if (!address || !user || !Array.isArray(body.items) || !body.items.length) return res.status(400).json({ error: 'A delivery address and cart items are required' }); const gstNumber = normalizeGstNumber(body.gstNumber ?? body.gst_number ?? address.gst_number ?? ''); if (gstNumber && !isValidGstNumber(gstNumber)) return res.status(400).json({ error: 'Please enter a valid GST number.' }); const normalizedItems = body.items.map((item) => ({ productId: Number(item.productId), name: String(item.name || '').trim(), quantity: Number(item.quantity || 0), price: Number(item.price || 0) })).filter((item) => item.productId && item.name && item.quantity > 0 && Number.isFinite(item.price)); if (!normalizedItems.length) return res.status(400).json({ error: 'Order items are invalid' }); const productIds = normalizedItems.map((item) => item.productId);
-  const placeholders = productIds.map(() => '?').join(',');
-  const catalog = db.prepare(`SELECT * FROM products WHERE id IN (${placeholders})`).all(...productIds);
-  const catalogMap = new Map(catalog.map((product) => [product.id, product]));
-  const snapshotItems = normalizedItems.map((item) => {
-    const product = catalogMap.get(item.productId);
-    if (!product) throw new Error(`Product ${item.productId} is unavailable`);
-    const quantity = Number(item.quantity || 0);
-    if (quantity <= 0) throw new Error(`Invalid quantity for ${product.name}`);
-    const finalPrice = Number(product.price || 0);
-    return {
-      productId: product.id,
-      productName: product.name,
-      productImage: product.image_url || '',
-      quantity,
-      unitPrice: finalPrice,
-      totalPrice: finalPrice * quantity,
-      name: product.name,
-      price: finalPrice,
-    };
-  });
-  const subtotal = snapshotItems.reduce((total, item) => total + item.totalPrice, 0);
-  const deliveryCharge = 0;
-  const total = subtotal + deliveryCharge;
+app.post('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; const address = db.prepare('SELECT * FROM addresses WHERE id = ? AND customer_id = ?').get(Number(body.addressId), req.user.id); const user = db.prepare('SELECT id,name,email,mobile_number FROM users WHERE id = ?').get(req.user.id); if (!address || !user || !Array.isArray(body.items) || !body.items.length) return res.status(400).json({ error: 'A delivery address and cart items are required' }); const gstNumber = normalizeGstNumber(body.gstNumber ?? body.gst_number ?? address.gst_number ?? ''); if (gstNumber && !isValidGstNumber(gstNumber)) return res.status(400).json({ error: 'Please enter a valid GST number.' }); const normalizedItems = body.items.map((item) => ({ productId: Number(item.productId), name: String(item.name || '').trim(), quantity: Number(item.quantity), price: Number(item.price || 0) })); if (!normalizedItems.length || normalizedItems.some((item) => !item.productId || !item.name || !Number.isInteger(item.quantity) || item.quantity <= 0 || !Number.isFinite(item.price) || item.price < 0)) {
+    return res.status(400).json({ error: 'Order items are invalid' });
+  }
   const timestamp = now();
-  const snapshot = { ...mapAddress(address), gstNumber: gstNumber || mapAddress(address).gstNumber || null };
-  const orderNumber = `MH-${String(Date.now()).slice(-6)}`;
-  const idempotencyKey = String(body.idempotencyKey || `${req.user.id}:${orderNumber}:${timestamp}`);
+  const idempotencyKey = String(body.idempotencyKey || `${req.user.id}:${Date.now()}:${timestamp}`);
   const existing = db.prepare('SELECT * FROM orders WHERE idempotency_key = ?').get(idempotencyKey);
   if (existing) return res.status(200).json(mapOrder(existing));
-  db.exec('BEGIN');
+
+  db.exec('BEGIN IMMEDIATE');
   try {
+    const catalogRows = normalizedItems.map((item) => db.prepare('SELECT * FROM products WHERE id = ? AND status = ?').get(item.productId, 'ACTIVE'));
+    if (catalogRows.some((product) => !product)) {
+      throw new Error('One or more products are unavailable');
+    }
+
+    const snapshotItems = normalizedItems.map((item) => {
+      const product = db.prepare('SELECT * FROM products WHERE id = ? AND status = ?').get(item.productId, 'ACTIVE');
+      if (!product) {
+        throw new Error(`Product ${item.productId} is unavailable`);
+      }
+      const quantity = Number(item.quantity);
+      if (!Number.isInteger(quantity) || quantity <= 0) {
+        throw new Error(`Invalid quantity for ${product.name}`);
+      }
+      if (Number(product.stock || 0) < quantity) {
+        throw new Error(`Insufficient stock for ${product.name}. Available: ${product.stock}`);
+      }
+      const finalPrice = Number(product.price || 0);
+      return {
+        productId: product.id,
+        productName: product.name,
+        productImage: product.image_url || '',
+        quantity,
+        unitPrice: finalPrice,
+        totalPrice: finalPrice * quantity,
+        name: product.name,
+        price: finalPrice,
+      };
+    });
+
+    const subtotal = snapshotItems.reduce((total, item) => total + item.totalPrice, 0);
+    const deliveryCharge = 0;
+    const total = subtotal + deliveryCharge;
+    const snapshot = { ...mapAddress(address), gstNumber: gstNumber || mapAddress(address).gstNumber || null };
+    const orderNumber = `MH-${String(Date.now()).slice(-6)}`;
+
     const result = db.prepare('INSERT INTO orders (order_number,customer_id,customer_name,customer_email,customer_phone,gst_number,items_json,subtotal,delivery_charge,total,status,payment_method,payment_status,delivery_address_json,idempotency_key,notification_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(orderNumber, req.user.id, user.name, user.email || `${user.mobile_number}@mobile.local`, address.phone, gstNumber || null, JSON.stringify(snapshotItems), subtotal, deliveryCharge, total, 'PENDING', 'Cash on Delivery', 'PENDING', JSON.stringify(snapshot), idempotencyKey, 'SENT', timestamp, timestamp);
     const orderId = Number(result.lastInsertRowid);
     const orderItemInsert = db.prepare('INSERT INTO order_items (order_id,product_id,product_name,product_image,quantity,unit_price,total_price,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)');
     for (const item of snapshotItems) {
       orderItemInsert.run(orderId, item.productId, item.productName, item.productImage, item.quantity, item.unitPrice, item.totalPrice, timestamp, timestamp);
     }
+
+    for (const item of snapshotItems) {
+      const stockResult = db.prepare('UPDATE products SET stock = stock - ?, updated_at = ? WHERE id = ? AND stock >= ?').run(item.quantity, now(), item.productId, item.quantity);
+      if (!stockResult.changes) {
+        throw new Error(`Insufficient stock for ${item.productName}`);
+      }
+    }
+
     db.exec('COMMIT');
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
     res.status(201).json(mapOrder(order));
@@ -272,13 +439,104 @@ app.post('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER
       const existingDuplicate = db.prepare('SELECT * FROM orders WHERE idempotency_key = ?').get(idempotencyKey);
       if (existingDuplicate) return res.status(200).json(mapOrder(existingDuplicate));
     }
-    res.status(400).json({ error: 'Unable to create order. Please try again.' });
+    const message = String(error.message || 'Unable to create order. Please try again.');
+    res.status(400).json({ error: message.includes('Insufficient stock') || message.includes('unavailable') || message.includes('Invalid quantity') ? message : 'Unable to create order. Please try again.' });
   }
 });
 app.get('/api/catalog', (_req, res) => { const categories = db.prepare("SELECT * FROM categories WHERE status = 'ACTIVE' ORDER BY sort_order, name").all().map(mapCategory); const products = db.prepare(`${productSelect} WHERE p.status = 'ACTIVE' ORDER BY p.created_at DESC`).all().map(mapProduct); res.json({ categories, products }); });
 app.get('/api/categories', (_req, res) => res.json(db.prepare('SELECT * FROM categories ORDER BY sort_order, name').all().map(mapCategory)));
-app.post('/api/categories', auth, admin, (req, res) => { const body = req.body || {}; const timestamp = now(); try { const result = db.prepare('INSERT INTO categories (name,slug,parent_id,image_url,description,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)').run(String(body.name).trim(), slugify(body.slug || body.name), body.parentId || null, body.imageUrl || null, body.description || '', body.status || 'ACTIVE', Number(body.sortOrder || 0), timestamp, timestamp); res.status(201).json(mapCategory(db.prepare('SELECT * FROM categories WHERE id = ?').get(result.lastInsertRowid))); } catch (error) { res.status(400).json({ error: error.message.includes('UNIQUE') ? 'Category slug already exists' : 'Unable to create category' }); } });
-app.patch('/api/categories/:id', auth, admin, (req, res) => { const body = req.body || {}; const timestamp = now(); try { const result = db.prepare('UPDATE categories SET name = COALESCE(?, name), slug = COALESCE(?, slug), parent_id = ?, image_url = ?, description = COALESCE(?, description), status = COALESCE(?, status), sort_order = COALESCE(?, sort_order), updated_at = ? WHERE id = ?').run(body.name == null ? null : String(body.name).trim(), body.slug == null ? null : slugify(body.slug || body.name), body.parentId ?? null, body.imageUrl ?? null, body.description == null ? null : String(body.description), body.status == null ? null : body.status, body.sortOrder == null ? null : Number(body.sortOrder), timestamp, Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Category not found' }); res.json(mapCategory(db.prepare('SELECT * FROM categories WHERE id = ?').get(Number(req.params.id)))); } catch (error) { res.status(400).json({ error: error.message.includes('UNIQUE') ? 'Category slug already exists' : 'Unable to update category' }); } });
+function upsertCategoryAttributes(categoryId, attributes) {
+  if (!Array.isArray(attributes)) return;
+  const attributeRows = attributes
+    .map((attribute) => ({
+      id: attribute?.id != null ? Number(attribute.id) : null,
+      name: String(attribute?.name || '').trim(),
+      type: String(attribute?.type || 'Text'),
+      values: Array.isArray(attribute?.values) ? attribute.values.map((value) => String(value).trim()).filter(Boolean) : [],
+    }))
+    .filter((attribute) => attribute.name);
+
+  const allowedType = new Set(['Dropdown', 'Multi-select', 'Text', 'Number', 'Number Range', 'Boolean / Yes-No', 'Color', 'Image', 'Radio Button']);
+  const existing = db.prepare('SELECT id, name FROM attributes WHERE category_id = ?').all(categoryId);
+  const existingByName = new Map(existing.map((row) => [String(row.name).trim().toLowerCase(), row]));
+  const nextIds = new Set();
+
+  for (const attribute of attributeRows) {
+    const normalizedType = allowedType.has(attribute.type) ? attribute.type : 'Text';
+    const key = attribute.name.trim().toLowerCase();
+    const current = existingByName.get(key);
+    const valuesJson = JSON.stringify(attribute.values);
+    if (current) {
+      db.prepare('UPDATE attributes SET name = ?, type = ?, options_json = ?, updated_at = ? WHERE id = ? AND category_id = ?').run(attribute.name, normalizedType, valuesJson, now(), current.id, categoryId);
+      nextIds.add(Number(current.id));
+    } else {
+      const result = db.prepare('INSERT INTO attributes (category_id, name, type, required, filterable, searchable, options_json, status, sort_order, created_at, updated_at) VALUES (?, ?, ?, 0, 0, 0, ?, ?, 0, ?, ?)').run(categoryId, attribute.name, normalizedType, valuesJson, 'ACTIVE', now(), now());
+      nextIds.add(Number(result.lastInsertRowid));
+    }
+  }
+
+  const staleIds = existing.filter((row) => !nextIds.has(Number(row.id))).map((row) => Number(row.id));
+  if (staleIds.length) {
+    const placeholders = staleIds.map(() => '?').join(',');
+    db.prepare(`DELETE FROM attributes WHERE id IN (${placeholders})`).run(...staleIds);
+  }
+}
+app.post('/api/categories', auth, admin, (req, res) => {
+  const body = req.body || {};
+  const timestamp = now();
+  const name = String(body.name || '').trim();
+  const providedSlug = String(body.slug || name || '').trim();
+  const slugValue = providedSlug ? slugify(providedSlug) : '';
+  if (!name) return res.status(400).json({ error: 'Category name is required' });
+  if (!slugValue) return res.status(400).json({ error: 'Category slug is required' });
+  db.exec('BEGIN');
+  try {
+    const duplicate = db.prepare('SELECT id FROM categories WHERE slug = ? COLLATE NOCASE').get(slugValue);
+    if (duplicate) {
+      db.exec('ROLLBACK');
+      return res.status(409).json({ error: 'Category slug already exists' });
+    }
+    const result = db.prepare('INSERT INTO categories (name,slug,parent_id,image_url,description,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)').run(name, slugValue, body.parentId || null, body.imageUrl || null, body.description || '', body.status || 'ACTIVE', Number(body.sortOrder || 0), timestamp, timestamp);
+    const category = mapCategory(db.prepare('SELECT * FROM categories WHERE id = ?').get(result.lastInsertRowid));
+    upsertCategoryAttributes(category.id, body.attributes);
+    db.exec('COMMIT');
+    res.status(201).json(category);
+  } catch (error) {
+    db.exec('ROLLBACK');
+    res.status(400).json({ error: error.message.includes('UNIQUE') ? 'Category slug already exists' : 'Unable to create category' });
+  }
+});
+app.patch('/api/categories/:id', auth, admin, (req, res) => {
+  const body = req.body || {};
+  const id = Number(req.params.id);
+  const timestamp = now();
+  const current = db.prepare('SELECT * FROM categories WHERE id = ?').get(id);
+  if (!current) return res.status(404).json({ error: 'Category not found' });
+  const name = body.name == null ? current.name : String(body.name).trim();
+  const providedSlug = body.slug == null ? current.slug : String(body.slug || body.name || '').trim();
+  const slugValue = providedSlug ? slugify(providedSlug) : current.slug;
+  if (!name) return res.status(400).json({ error: 'Category name is required' });
+  db.exec('BEGIN');
+  try {
+    const duplicate = db.prepare('SELECT id FROM categories WHERE slug = ? COLLATE NOCASE AND id != ?').get(slugValue, id);
+    if (duplicate) {
+      db.exec('ROLLBACK');
+      return res.status(409).json({ error: 'Category slug already exists' });
+    }
+    const imageValue = body.imageUrl == null ? current.image_url : body.imageUrl || current.image_url;
+    const result = db.prepare('UPDATE categories SET name = ?, slug = ?, parent_id = ?, image_url = ?, description = ?, status = ?, sort_order = ?, updated_at = ? WHERE id = ?').run(name, slugValue, body.parentId ?? current.parent_id, imageValue, body.description == null ? current.description : String(body.description), body.status == null ? current.status : body.status, body.sortOrder == null ? current.sort_order : Number(body.sortOrder), timestamp, id);
+    if (!result.changes) {
+      db.exec('ROLLBACK');
+      return res.status(404).json({ error: 'Category not found' });
+    }
+    upsertCategoryAttributes(id, body.attributes);
+    db.exec('COMMIT');
+    res.json(mapCategory(db.prepare('SELECT * FROM categories WHERE id = ?').get(id)));
+  } catch (error) {
+    db.exec('ROLLBACK');
+    res.status(400).json({ error: error.message.includes('UNIQUE') ? 'Category slug already exists' : 'Unable to update category' });
+  }
+});
 app.patch('/api/categories/:id/archive', auth, admin, (req, res) => { const id = Number(req.params.id); const productCount = db.prepare("SELECT COUNT(*) count FROM products WHERE category_id = ? AND status != 'ARCHIVED'").get(id).count; if (productCount > 0) { const result = db.prepare("UPDATE categories SET status = 'ARCHIVED', updated_at = ? WHERE id = ?").run(now(), id); if (!result.changes) return res.status(404).json({ error: 'Category not found' }); return res.json({ archived: true, productCount, message: 'Category archived and removed from the public catalog.' }); } const result = db.prepare('DELETE FROM categories WHERE id = ?').run(id); if (!result.changes) return res.status(404).json({ error: 'Category not found' }); res.json({ deleted: true, message: 'Category deleted because it has no remaining products.' }); });
 app.patch('/api/categories/:id/restore', auth, admin, (req, res) => { const result = db.prepare("UPDATE categories SET status = 'ACTIVE', updated_at = ? WHERE id = ?").run(now(), Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Category not found' }); res.json({ restored: true }); });
 app.get('/api/brands', (_req, res) => res.json(db.prepare('SELECT * FROM brands ORDER BY name').all().map(mapBrand)));
@@ -286,22 +544,53 @@ app.post('/api/brands', auth, admin, (req, res) => { const body = req.body || {}
 app.patch('/api/brands/:id', auth, admin, (req, res) => { const body = req.body || {}; const timestamp = now(); try { const result = db.prepare('UPDATE brands SET name = COALESCE(?, name), logo_url = COALESCE(?, logo_url), description = COALESCE(?, description), status = COALESCE(?, status), updated_at = ? WHERE id = ?').run(body.name ?? null, body.logoUrl ?? null, body.description ?? null, body.status ?? null, timestamp, Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Brand not found' }); res.json(mapBrand(db.prepare('SELECT * FROM brands WHERE id = ?').get(Number(req.params.id)))); } catch { res.status(400).json({ error: 'Unable to update brand' }); } });
 app.patch('/api/brands/:id/archive', auth, admin, (req, res) => { const id = Number(req.params.id); const productCount = db.prepare("SELECT COUNT(*) count FROM products WHERE brand_id = ? AND status != 'ARCHIVED'").get(id).count; if (productCount > 0) { const result = db.prepare("UPDATE brands SET status = 'ARCHIVED', updated_at = ? WHERE id = ?").run(now(), id); if (!result.changes) return res.status(404).json({ error: 'Brand not found' }); return res.json({ archived: true, productCount, message: 'Brand archived and removed from active catalog listings.' }); } const result = db.prepare('DELETE FROM brands WHERE id = ?').run(id); if (!result.changes) return res.status(404).json({ error: 'Brand not found' }); res.json({ deleted: true, message: 'Brand deleted because it has no remaining products.' }); });
 app.patch('/api/brands/:id/restore', auth, admin, (req, res) => { const result = db.prepare("UPDATE brands SET status = 'ACTIVE', updated_at = ? WHERE id = ?").run(now(), Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Brand not found' }); res.json({ restored: true }); });
-app.get('/api/product-types', (_req, res) => { const categoryId = Number(req.query.categoryId || 0); const query = categoryId ? 'SELECT * FROM product_types WHERE category_id = ? ORDER BY sort_order, name' : 'SELECT * FROM product_types ORDER BY category_id, sort_order, name'; const rows = categoryId ? db.prepare(query).all(categoryId) : db.prepare(query).all(); res.json(rows.map(mapProductType)); });
+app.get('/api/product-types', (req, res) => { const categoryId = Number(req.query.categoryId || 0); const query = categoryId ? 'SELECT * FROM product_types WHERE category_id = ? ORDER BY sort_order, name' : 'SELECT * FROM product_types ORDER BY category_id, sort_order, name'; const rows = categoryId ? db.prepare(query).all(categoryId) : db.prepare(query).all(); res.json(rows.map(mapProductType)); });
 app.post('/api/product-types', auth, admin, (req, res) => { const body = req.body || {}; const timestamp = now(); try { const result = db.prepare('INSERT INTO product_types (category_id,name,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?)').run(Number(body.categoryId), String(body.name).trim(), body.status || 'ACTIVE', Number(body.sortOrder || 0), timestamp, timestamp); res.status(201).json(mapProductType(db.prepare('SELECT * FROM product_types WHERE id = ?').get(result.lastInsertRowid))); } catch (error) { res.status(400).json({ error: error.message.includes('UNIQUE') ? 'A product type with that name already exists in this category' : 'Unable to create product type' }); } });
 app.patch('/api/product-types/:id/archive', auth, admin, (req, res) => { const id = Number(req.params.id); const productCount = db.prepare("SELECT COUNT(*) count FROM products WHERE product_type_id = ? AND status != 'ARCHIVED'").get(id).count; if (productCount > 0) { const result = db.prepare("UPDATE product_types SET status = 'ARCHIVED', updated_at = ? WHERE id = ?").run(now(), id); if (!result.changes) return res.status(404).json({ error: 'Product type not found' }); return res.json({ archived: true, productCount, message: 'Product type archived and removed from active category workflows.' }); } const result = db.prepare('DELETE FROM product_types WHERE id = ?').run(id); if (!result.changes) return res.status(404).json({ error: 'Product type not found' }); res.json({ deleted: true, message: 'Product type deleted because it has no remaining products.' }); });
 app.patch('/api/product-types/:id/restore', auth, admin, (req, res) => { const result = db.prepare("UPDATE product_types SET status = 'ACTIVE', updated_at = ? WHERE id = ?").run(now(), Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Product type not found' }); res.json({ restored: true }); });
-app.get('/api/attributes', (_req, res) => { const categoryId = Number(req.query.categoryId || 0); const query = categoryId ? 'SELECT * FROM attributes WHERE category_id = ? ORDER BY sort_order, name' : 'SELECT * FROM attributes ORDER BY category_id, sort_order, name'; const rows = categoryId ? db.prepare(query).all(categoryId) : db.prepare(query).all(); res.json(rows.map(mapAttribute)); });
+app.get('/api/attributes', (req, res) => { const categoryId = Number(req.query.categoryId || 0); const query = categoryId ? 'SELECT * FROM attributes WHERE category_id = ? ORDER BY sort_order, name' : 'SELECT * FROM attributes ORDER BY category_id, sort_order, name'; const rows = categoryId ? db.prepare(query).all(categoryId) : db.prepare(query).all(); res.json(rows.map(mapAttribute)); });
 app.post('/api/attributes', auth, admin, (req, res) => { const body = req.body || {}; const timestamp = now(); try { const result = db.prepare('INSERT INTO attributes (category_id,name,type,required,filterable,searchable,options_json,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(Number(body.categoryId), String(body.name).trim(), String(body.type || 'Text'), Number(Boolean(body.required)), Number(Boolean(body.filterable)), Number(Boolean(body.searchable)), JSON.stringify(Array.isArray(body.options) ? body.options : []), body.status || 'ACTIVE', Number(body.sortOrder || 0), timestamp, timestamp); res.status(201).json(mapAttribute(db.prepare('SELECT * FROM attributes WHERE id = ?').get(result.lastInsertRowid))); } catch (error) { res.status(400).json({ error: error.message.includes('UNIQUE') ? 'An attribute with that name already exists in this category' : 'Unable to create attribute' }); } });
 app.patch('/api/attributes/:id/archive', auth, admin, (req, res) => { const id = Number(req.params.id); const productCount = db.prepare("SELECT COUNT(*) count FROM products WHERE attributes_json LIKE ? AND status != 'ARCHIVED'").get(`%"${id}"%`).count; if (productCount > 0) { const result = db.prepare("UPDATE attributes SET status = 'ARCHIVED', updated_at = ? WHERE id = ?").run(now(), id); if (!result.changes) return res.status(404).json({ error: 'Attribute not found' }); return res.json({ archived: true, productCount, message: 'Attribute archived and preserved on existing products.' }); } const result = db.prepare('DELETE FROM attributes WHERE id = ?').run(id); if (!result.changes) return res.status(404).json({ error: 'Attribute not found' }); res.json({ deleted: true, message: 'Attribute deleted because it is not used by any products.' }); });
 app.patch('/api/attributes/:id/restore', auth, admin, (req, res) => { const result = db.prepare("UPDATE attributes SET status = 'ACTIVE', updated_at = ? WHERE id = ?").run(now(), Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Attribute not found' }); res.json({ restored: true }); });
 app.post('/api/migration/legacy', auth, admin, (req, res) => { const categories = Array.isArray(req.body?.categories) ? req.body.categories : []; const products = Array.isArray(req.body?.products) ? req.body.products : []; const timestamp = now(); try { db.exec('BEGIN'); const categoryInsert = db.prepare('INSERT OR IGNORE INTO categories (name,slug,description,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?)'); for (const [index, category] of categories.entries()) categoryInsert.run(String(category.name || '').trim(), slugify(category.slug || category.name || `legacy-${index}`), category.description || '', Number(category.order || index + 1), timestamp, timestamp); const categoryId = db.prepare('SELECT id FROM categories WHERE name = ? COLLATE NOCASE'); const brandInsert = db.prepare('INSERT OR IGNORE INTO brands (name,slug,created_at,updated_at) VALUES (?,?,?,?)'); const brandId = db.prepare('SELECT id FROM brands WHERE name = ? COLLATE NOCASE'); const productInsert = db.prepare('INSERT OR IGNORE INTO products (sku,name,slug,category_id,brand_id,description,details,price,mrp,stock,unit,image_url,attributes_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'); for (const product of products) { const categoryRow = categoryId.get(String(product.category || 'Other Products')); if (!categoryRow) continue; const brandName = String(product.brand || '').trim(); if (brandName) brandInsert.run(brandName, slugify(brandName), timestamp, timestamp); const brandRow = brandName ? brandId.get(brandName) : null; const sku = String(product.code || product.sku || '').trim(); if (!sku) continue; productInsert.run(sku, String(product.name || sku), slugify(`${product.name || sku}-${sku}`), categoryRow.id, brandRow?.id || null, product.description || '', product.details || '', Number(product.price || 0), Number(product.mrp || product.price || 0), Number(product.stock || 0), product.unit || 'Nos', product.image || null, JSON.stringify(product.attributes || {}), timestamp, timestamp); } db.exec('COMMIT'); res.json({ migrated: { categories: categories.length, products: products.length } }); } catch (error) { db.exec('ROLLBACK'); res.status(400).json({ error: 'Migration failed', detail: error.message }); } });
 app.get('/api/products', (req, res) => { const page = Math.max(1, Number(req.query.page || 1)); const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50))); const search = String(req.query.search || '').trim(); const params = []; const filters = ["p.status = 'ACTIVE'"]; if (search) { filters.push('(p.name LIKE ? OR p.sku LIKE ? OR c.name LIKE ? OR b.name LIKE ?)'); params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`); } if (req.query.categoryId) { filters.push('p.category_id = ?'); params.push(Number(req.query.categoryId)); } const where = ` WHERE ${filters.join(' AND ')}`; const total = db.prepare(`SELECT COUNT(*) count FROM products p JOIN categories c ON c.id = p.category_id LEFT JOIN brands b ON b.id = p.brand_id${where}`).get(...params).count; const rows = db.prepare(`${productSelect}${where} ORDER BY p.created_at DESC LIMIT ? OFFSET ?`).all(...params, limit, (page - 1) * limit).map(mapProduct); res.json({ data: rows, page, limit, total, pages: Math.ceil(total / limit) }); });
-app.post('/api/products', auth, admin, (req, res) => { const body = req.body || {}; const sku = String(body.sku || '').trim(); const name = String(body.name || '').trim(); const categoryId = Number(body.categoryId); const price = Number(body.price); const stock = Number(body.stock ?? 0); if (!sku || !name || !categoryId || !Number.isFinite(price) || price < 0 || !Number.isInteger(stock) || stock < 0) return res.status(400).json({ error: 'SKU, product name, category, valid price and stock are required' }); const timestamp = now(); try { const brandId = body.brandId || db.prepare('SELECT id FROM brands WHERE name = ? COLLATE NOCASE').get(String(body.brand || '').trim())?.id || null; const result = db.prepare('INSERT INTO products (sku,name,slug,category_id,brand_id,product_type_id,description,details,price,mrp,discount,stock,unit,image_url,image_urls_json,attributes_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(sku, name, slugify(`${name}-${sku}`), categoryId, brandId, body.productTypeId || null, body.description || '', body.details || '', price, Number(body.mrp || price), Number(body.discount || 0), stock, body.unit || 'Nos', body.imageUrl || null, JSON.stringify(body.imageUrls || []), JSON.stringify(body.attributes || {}), body.status || 'ACTIVE', timestamp, timestamp); res.status(201).json(mapProduct(db.prepare(`${productSelect} WHERE p.id = ?`).get(result.lastInsertRowid))); } catch (error) { res.status(error.message.includes('UNIQUE') ? 409 : 400).json({ error: error.message.includes('UNIQUE') ? 'SKU already exists' : 'Unable to create product' }); } });
-app.patch('/api/products/:id', auth, admin, (req, res) => { const body = req.body || {}; const id = Number(req.params.id); const current = db.prepare('SELECT * FROM products WHERE id = ?').get(id); if (!current) return res.status(404).json({ error: 'Product not found' }); const values = { name: body.name == null ? current.name : String(body.name).trim(), categoryId: body.categoryId == null ? current.category_id : Number(body.categoryId), price: body.price == null ? current.price : Number(body.price), stock: body.stock == null ? current.stock : Number(body.stock) }; if (!values.name || !values.categoryId || !Number.isFinite(values.price) || values.price < 0 || !Number.isInteger(values.stock) || values.stock < 0) return res.status(400).json({ error: 'Invalid product data' }); const timestamp = now(); try { const brandId = body.brandId || db.prepare('SELECT id FROM brands WHERE name = ? COLLATE NOCASE').get(String(body.brand || '').trim())?.id || current.brand_id; db.prepare('UPDATE products SET name = ?, category_id = ?, brand_id = ?, product_type_id = ?, description = ?, details = ?, price = ?, mrp = ?, discount = ?, stock = ?, unit = ?, image_url = ?, image_urls_json = ?, attributes_json = ?, status = ?, updated_at = ? WHERE id = ?').run(values.name, values.categoryId, brandId, body.productTypeId ?? current.product_type_id, body.description ?? current.description, body.details ?? current.details, values.price, body.mrp ?? current.mrp, body.discount ?? current.discount, values.stock, body.unit ?? current.unit, body.imageUrl ?? current.image_url, JSON.stringify(body.imageUrls ?? safeJson(current.image_urls_json, [])), JSON.stringify(body.attributes ?? safeJson(current.attributes_json, {})), body.status ?? current.status, timestamp, id); res.json(mapProduct(db.prepare(`${productSelect} WHERE p.id = ?`).get(id))); } catch { res.status(400).json({ error: 'Unable to update product' }); } });
+app.post('/api/products', auth, admin, (req, res) => { const body = req.body || {}; const sku = String(body.sku || '').trim(); const name = String(body.name || '').trim(); const categoryId = Number(body.categoryId); const price = Number(body.price); const stock = Number(body.stock ?? 0); if (!sku || !name || !categoryId || !Number.isFinite(price) || price < 0 || !Number.isInteger(stock) || stock < 0) return res.status(400).json({ error: 'SKU, product name, category, valid price and stock are required' }); const timestamp = now(); try { const brandId = body.brandId || db.prepare('SELECT id FROM brands WHERE name = ? COLLATE NOCASE').get(String(body.brand || '').trim())?.id || null; const result = db.prepare('INSERT INTO products (sku,name,slug,category_id,brand_id,product_type_id,description,details,price,mrp,discount,stock,unit,image_url,image_urls_json,attributes_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(sku, name, slugify(`${name}-${sku}`), categoryId, brandId, body.productTypeId || null, body.description || '', body.details || '', price, Number(body.mrp || price), Number(body.discount || 0), stock, body.unit || 'Nos', body.imageUrl || null, JSON.stringify(body.imageUrls || []), JSON.stringify(body.attributes || {}), body.status || 'ACTIVE', timestamp, timestamp); const product = mapProduct(db.prepare(`${productSelect} WHERE p.id = ?`).get(result.lastInsertRowid)); if (!product) return res.status(500).json({ error: 'Product persisted but could not be loaded' }); res.status(201).json(product); } catch (error) { res.status(error.message.includes('UNIQUE') ? 409 : 400).json({ error: error.message.includes('UNIQUE') ? 'SKU already exists' : 'Unable to create product' }); } });
+app.patch('/api/products/:id', auth, admin, (req, res) => { const body = req.body || {}; const id = Number(req.params.id); const current = db.prepare('SELECT * FROM products WHERE id = ?').get(id); if (!current) return res.status(404).json({ error: 'Product not found' }); const values = { name: body.name == null ? current.name : String(body.name).trim(), categoryId: body.categoryId == null ? current.category_id : Number(body.categoryId), price: body.price == null ? current.price : Number(body.price), stock: body.stock == null ? current.stock : Number(body.stock) }; if (!values.name || !values.categoryId || !Number.isFinite(values.price) || values.price < 0 || !Number.isInteger(values.stock) || values.stock < 0) return res.status(400).json({ error: 'Invalid product data' }); const timestamp = now(); try { const brandId = body.brandId || db.prepare('SELECT id FROM brands WHERE name = ? COLLATE NOCASE').get(String(body.brand || '').trim())?.id || current.brand_id; db.prepare('UPDATE products SET name = ?, category_id = ?, brand_id = ?, product_type_id = ?, description = ?, details = ?, price = ?, mrp = ?, discount = ?, stock = ?, unit = ?, image_url = ?, image_urls_json = ?, attributes_json = ?, status = ?, updated_at = ? WHERE id = ?').run(values.name, values.categoryId, brandId, body.productTypeId ?? current.product_type_id, body.description ?? current.description, body.details ?? current.details, values.price, body.mrp ?? current.mrp, body.discount ?? current.discount, values.stock, body.unit ?? current.unit, body.imageUrl ?? current.image_url, JSON.stringify(body.imageUrls ?? safeJson(current.image_urls_json, [])), JSON.stringify(body.attributes ?? safeJson(current.attributes_json, {})), body.status ?? current.status, timestamp, id); const product = mapProduct(db.prepare(`${productSelect} WHERE p.id = ?`).get(id)); if (!product) return res.status(500).json({ error: 'Product updated but could not be reloaded' }); res.json(product); } catch { res.status(400).json({ error: 'Unable to update product' }); } });
 app.patch('/api/products/:id/archive', auth, admin, (req, res) => { const result = db.prepare("UPDATE products SET status = 'ARCHIVED', updated_at = ? WHERE id = ?").run(now(), Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Product not found' }); res.status(204).end(); });
-app.post('/api/images', auth, admin, upload.single('image'), (req, res) => { if (!req.file) return res.status(400).json({ error: 'Image is required' }); const extension = path.extname(req.file.originalname).toLowerCase() || '.bin'; const target = `${req.file.path}${extension}`; fs.renameSync(req.file.path, target); res.status(201).json({ url: `/uploads/${path.basename(target)}` }); });
-app.get('/api/admin/stats', auth, admin, (_req, res) => { const count = (sql) => db.prepare(sql).get().count; res.json({ products: count("SELECT COUNT(*) count FROM products WHERE status != 'ARCHIVED'"), categories: count("SELECT COUNT(*) count FROM categories WHERE status != 'ARCHIVED'"), brands: count("SELECT COUNT(*) count FROM brands WHERE status != 'ARCHIVED'"), customers: count("SELECT COUNT(*) count FROM users WHERE role = 'CUSTOMER'") }); });
+app.post('/api/images', auth, admin, upload.single('image'), (req, res) => { if (!req.file) return res.status(400).json({ error: 'Image is required' }); const safeName = path.basename(req.file.originalname || 'upload').replace(/[^a-zA-Z0-9._-]/g, '_'); const safePath = path.join(uploadDirectory, `${Date.now()}-${safeName}`); fs.renameSync(req.file.path, safePath); res.status(201).json({ url: `/uploads/${path.basename(safePath)}` }); });
+app.get('/api/admin/stats', auth, admin, (_req, res) => { const count = (sql) => db.prepare(sql).get().count; res.json({ products: count("SELECT COUNT(*) count FROM products WHERE status != 'ARCHIVED'"), categories: count("SELECT COUNT(*) count FROM categories WHERE status != 'ARCHIVED'"), brands: count("SELECT COUNT(*) count FROM brands WHERE status != 'ARCHIVED'"), customers: count("SELECT COUNT(*) count FROM users WHERE role = 'CUSTOMER'"), orders: count('SELECT COUNT(*) count FROM orders'), revenue: Number(db.prepare('SELECT COALESCE(SUM(total), 0) total FROM orders').get().total || 0) }); });
+app.get('/api/admin/products', auth, admin, (req, res) => { const page = Math.max(1, Number(req.query.page || 1)); const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50))); const rows = db.prepare(`${productSelect} ORDER BY p.created_at DESC LIMIT ? OFFSET ?`).all(limit, (page - 1) * limit).map(mapProduct); const total = db.prepare('SELECT COUNT(*) count FROM products').get().count; res.json({ data: rows, page, limit, total, pages: Math.ceil(total / limit) }); });
+app.get('/api/admin/settings', auth, admin, (_req, res) => { const settings = Object.fromEntries(db.prepare('SELECT key, value FROM settings').all().map((item) => [item.key, item.value])); res.json({ businessName: settings.businessName || 'Murugesan Electrical and Hardwares', phone: settings.phone || '9361866771', gstin: settings.gstin || '', address: settings.address || '', logo: settings.logo || '' }); });
+app.patch('/api/admin/settings', auth, admin, (req, res) => { const body = req.body || {}; const values = [
+    ['businessName', String(body.businessName ?? body.business_name ?? '').trim()],
+    ['phone', String(body.phone ?? '').trim()],
+    ['gstin', String(body.gstin ?? body.gst_number ?? '').trim()],
+    ['address', String(body.address ?? '').trim()],
+    ['logo', String(body.logo ?? '').trim()],
+  ];
+  db.exec('BEGIN');
+  try {
+    for (const [key, value] of values) {
+      if (!key) continue;
+      const existing = db.prepare('SELECT id FROM settings WHERE key = ?').get(key);
+      if (existing) {
+        db.prepare('UPDATE settings SET value = ?, updated_at = ? WHERE id = ?').run(value, now(), existing.id);
+      } else {
+        db.prepare('INSERT INTO settings (key, value, created_at, updated_at) VALUES (?, ?, ?, ?)').run(key, value, now(), now());
+      }
+    }
+    db.exec('COMMIT');
+    res.json({ ok: true, settings: Object.fromEntries(values) });
+  } catch (error) {
+    db.exec('ROLLBACK');
+    res.status(400).json({ error: 'Unable to update settings' });
+  }
+});
 app.use(express.static(path.join(root, 'dist')));
 app.use((req, res, next) => { if (req.method !== 'GET' || req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) return next(); res.sendFile(path.join(root, 'dist', 'index.html')); });
-app.use((error, _req, res, _next) => { console.error(error); res.status(500).json({ error: 'Unexpected server error' }); });
+app.use((error, _req, res, _next) => {
+  console.error('UNEXPECTED_SERVER_ERROR');
+  console.error(error && error.stack ? error.stack : error);
+  res.status(500).json({ error: 'Unexpected server error' });
+});
 app.listen(port, () => console.log(`Catalog API listening on http://localhost:${port}`));
