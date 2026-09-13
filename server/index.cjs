@@ -21,33 +21,63 @@ const jwtSecret = process.env.JWT_SECRET || (!isProduction ? 'murugesan-local-de
 if (!jwtSecret) {
   throw new Error('JWT_SECRET is required in production.');
 }
-const defaultDatabasePath = process.env.DATABASE_PATH || (isProduction ? '/var/data/catalog.sqlite' : 'server/data/catalog.sqlite');
-let databasePath = defaultDatabasePath.startsWith('/') ? defaultDatabasePath : path.resolve(root, defaultDatabasePath);
-const uploadDirSetting = process.env.UPLOAD_DIR || (isProduction ? '/var/data/uploads' : 'server/uploads');
-let uploadDirectory = uploadDirSetting.startsWith('/') ? uploadDirSetting : path.resolve(root, uploadDirSetting);
+const seedDemoDataEnabled = String(process.env.SEED_DEMO_DATA || '').trim().toLowerCase() === 'true';
+const productionDatabasePath = '/var/data/catalog.sqlite';
+const productionUploadDirectory = '/var/data/uploads';
+const normalizeProductionPath = (value, expectedValue, label) => {
+  const candidate = String(value ?? '').trim();
+  if (!candidate) return expectedValue;
+  if (candidate === expectedValue) return expectedValue;
+  throw new Error(`Production ${label} must be exactly ${expectedValue}. Received: ${candidate}`);
+};
+
+let databasePath;
+if (isProduction) {
+  const configuredDatabasePath = process.env.DATABASE_PATH;
+  databasePath = normalizeProductionPath(configuredDatabasePath, productionDatabasePath, 'DATABASE_PATH');
+} else {
+  const rawDatabasePath = process.env.DATABASE_PATH || 'server/data/catalog.sqlite';
+  databasePath = rawDatabasePath.startsWith('/') ? rawDatabasePath : path.resolve(root, rawDatabasePath);
+}
+
+let uploadDirectory;
+if (isProduction) {
+  const configuredUploadDir = process.env.UPLOAD_DIR;
+  uploadDirectory = normalizeProductionPath(configuredUploadDir, productionUploadDirectory, 'UPLOAD_DIR');
+} else {
+  const rawUploadDirectory = process.env.UPLOAD_DIR || 'server/uploads';
+  uploadDirectory = rawUploadDirectory.startsWith('/') ? rawUploadDirectory : path.resolve(root, rawUploadDirectory);
+}
+
+const resolvedDatabasePath = isProduction ? databasePath : path.resolve(databasePath);
+const resolvedUploadDirectory = isProduction ? uploadDirectory : path.resolve(uploadDirectory);
 
 try {
-  fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+  const databaseDir = path.dirname(resolvedDatabasePath);
+  fs.mkdirSync(databaseDir, { recursive: true });
 } catch (err) {
-  if (err.code === 'EACCES') {
-    databasePath = path.resolve(root, '.data/catalog.sqlite');
-    fs.mkdirSync(path.dirname(databasePath), { recursive: true });
-  } else {
-    throw err;
-  }
+  throw new Error(`Unable to create database directory: ${path.dirname(resolvedDatabasePath)} (${err.message})`);
 }
 
 try {
-  fs.mkdirSync(uploadDirectory, { recursive: true });
+  fs.mkdirSync(resolvedUploadDirectory, { recursive: true });
 } catch (err) {
-  if (err.code === 'EACCES') {
-    uploadDirectory = path.resolve(root, '.data/uploads');
-    fs.mkdirSync(uploadDirectory, { recursive: true });
-  } else {
-    throw err;
-  }
+  throw new Error(`Unable to create upload directory: ${resolvedUploadDirectory} (${err.message})`);
 }
-const db = new DatabaseSync(databasePath);
+
+if (isProduction) {
+  console.log('[database] Production contract', {
+    environment: process.env.NODE_ENV,
+    configuredDatabasePath: process.env.DATABASE_PATH || '(unset)',
+    databasePath,
+    resolvedDatabasePath,
+    uploadDirectory,
+    resolvedUploadDirectory,
+    contract: 'PASS',
+  });
+}
+
+const db = new DatabaseSync(resolvedDatabasePath);
 
 const now = () => new Date().toISOString();
 const normalizePhoneNumber = (value) => {
@@ -289,7 +319,7 @@ function ensureCoreAdminAccount() {
   }
 }
 function seedDemoData() {
-  if (process.env.SEED_DEMO_DATA !== 'true') return;
+  if (!seedDemoDataEnabled) return;
   const categoriesCount = db.prepare('SELECT COUNT(*) count FROM categories').get().count;
   if (categoriesCount > 0) return;
   const categoryNames = ['Electrical Switches', 'Sockets', 'Wires & Cables', 'Lighting', 'Fan Regulators', 'Electrical Accessories', 'Tools', 'Hardware', 'Plumbing Accessories', 'Other Products'];
@@ -318,10 +348,10 @@ backupDatabaseIfNeeded();
 applyDatabaseMigrations();
 ensureCoreAdminAccount();
 seedDemoData();
-console.log('[database] Connected', { path: databasePath, seedDemoData: process.env.SEED_DEMO_DATA === 'true' });
+console.log('[database] Connected', { path: databasePath, resolvedPath: resolvedDatabasePath, environment: process.env.NODE_ENV || 'development', seedDemoData: seedDemoDataEnabled });
 
 const app = express();
-console.log('[database] Configured', { path: databasePath, uploadDirectory, jwtSecretConfigured: Boolean(jwtSecret), seedDemoData: process.env.SEED_DEMO_DATA === 'true' });
+console.log('[database] Configured', { path: databasePath, resolvedPath: resolvedDatabasePath, uploadDirectory, resolvedUploadDirectory, jwtSecretConfigured: Boolean(jwtSecret), seedDemoData: seedDemoDataEnabled });
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 app.use('/uploads', express.static(uploadDirectory));

@@ -91,9 +91,11 @@ function DynamicCategoryManager({
     event.preventDefault();
     if (!editing?.name.trim()) return;
     const isNewCategory = !editing.id || editing.id === 0;
+    const normalizedName = editing.name.trim();
+    const normalizedSlug = editing.slug?.trim() || normalizedName;
     const payload = {
-      name: editing.name.trim(),
-      slug: editing.slug?.trim(),
+      name: normalizedName,
+      slug: normalizedSlug,
       parentId: editing.parentId || null,
       imageUrl: editing.image || null,
       description: editing.description || "",
