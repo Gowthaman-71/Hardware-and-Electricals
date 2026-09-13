@@ -25,6 +25,7 @@ if (!jwtSecret) {
 const seedDemoDataEnabled = String(process.env.SEED_DEMO_DATA || '').trim().toLowerCase() === 'true';
 const productionDatabaseUrl = process.env.DATABASE_URL || null;
 const productionUploadDirectory = path.resolve(root, 'server/uploads');
+const renderWritableUploadDirectory = '/tmp/uploads';
 
 if (isProduction && !productionDatabaseUrl) {
   throw new Error('Production requires DATABASE_URL to be configured. SQLite is not allowed in production.');
@@ -41,7 +42,8 @@ if (isProduction) {
 let uploadDirectory;
 if (isProduction) {
   const configuredUploadDir = process.env.UPLOAD_DIR;
-  uploadDirectory = configuredUploadDir && configuredUploadDir.trim() ? path.resolve(root, configuredUploadDir) : productionUploadDirectory;
+  const fallbackUploadDir = process.env.RENDER === 'true' ? renderWritableUploadDirectory : productionUploadDirectory;
+  uploadDirectory = configuredUploadDir && configuredUploadDir.trim() ? configuredUploadDir : fallbackUploadDir;
 } else {
   const rawUploadDirectory = process.env.UPLOAD_DIR || 'server/uploads';
   uploadDirectory = rawUploadDirectory.startsWith('/') ? rawUploadDirectory : path.resolve(root, rawUploadDirectory);
