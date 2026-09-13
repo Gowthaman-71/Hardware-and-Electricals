@@ -104,6 +104,8 @@ CREATE TABLE IF NOT EXISTS product_types (
   name TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'ARCHIVED')),
   sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
   UNIQUE(category_id, name)
 );
 
@@ -118,6 +120,8 @@ CREATE TABLE IF NOT EXISTS attributes (
   options_json TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'ARCHIVED')),
   sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
   UNIQUE(category_id, name)
 );
 

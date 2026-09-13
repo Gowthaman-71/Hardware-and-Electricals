@@ -642,6 +642,9 @@ const formatOrderStatus = (status: string) => {
 const logoPath = "/assets/logo/murugesan-logo.png";
 const fallbackImage =
   "https://images.unsplash.com/photo-1621905252507-b35492cc74b4?auto=format&fit=crop&w=900&q=80";
+const businessWhatsappNumber = String(
+  import.meta.env.VITE_BUSINESS_WHATSAPP_NUMBER || "+919361866771",
+).replace(/\D/g, "");
 const image = (id: string) =>
   `https://images.unsplash.com/${id}?auto=format&fit=crop&w=900&q=82`;
 const money = (value: number) => `₹${value.toLocaleString("en-IN")}`;
@@ -1683,7 +1686,7 @@ function Cart({
               className="button blue"
               onClick={() => {
                 window.open(
-                  `https://wa.me/919361866771?text=${encodeURIComponent(`Hello Murugesan Electrical and Hardwares, I am interested in:\n${items.map(({ product, quantity }) => `Product: ${product.name}\nCode: ${product.code}\nQuantity: ${quantity}\nPrice: ${money(product.price)}`).join("\n\n")}`)}`,
+                  `https://wa.me/${businessWhatsappNumber}?text=${encodeURIComponent(`Hello Murugesan Electrical and Hardwares, I am interested in:\n${items.map(({ product, quantity }) => `Product: ${product.name}\nCode: ${product.code}\nQuantity: ${quantity}\nPrice: ${money(product.price)}`).join("\n\n")}`)}`,
                   "_blank",
                 );
                 onNotify("Opening WhatsApp enquiry");
@@ -1729,7 +1732,7 @@ function Cart({
 }
 function whatsapp(product: Product) {
   window.open(
-    `https://wa.me/919361866771?text=${encodeURIComponent(`Hello Murugesan Electrical and Hardwares, I am interested in:\nProduct: ${product.name}\nCode: ${product.code}\nQuantity: 1\nPrice: ${money(product.price)}\n\nPlease confirm availability and final price.`)}`,
+    `https://wa.me/${businessWhatsappNumber}?text=${encodeURIComponent(`Hello Murugesan Electrical and Hardwares, I am interested in:\nProduct: ${product.name}\nCode: ${product.code}\nQuantity: 1\nPrice: ${money(product.price)}\n\nPlease confirm availability and final price.`)}`,
     "_blank",
   );
 }
@@ -2219,6 +2222,8 @@ function Admin({
               products={products}
               notify={notify}
             />
+          ) : view === "Customers" ? (
+            <AdminCustomersList notify={notify} />
           ) : view === "Settings" ? (
             <AdminSettings notify={notify} />
           ) : view === "Orders / Enquiries" ? (
@@ -2349,6 +2354,71 @@ function Stat({
         {warning ? "Needs attention" : "Live now"}
       </small>
     </div>
+  );
+}
+function AdminCustomersList({ notify }: { notify: (message: string) => void }) {
+  const [customers, setCustomers] = useState<Array<{id:number; name:string; email:string; phone:string; status:string; createdAt:string; lastLogin?:string; orderCount:number; totalSpent:number}>>([]);
+  const [loading, setLoading] = useState(true);
+  const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
+  const loadCustomers = async () => {
+    if (!apiToken) return;
+    setLoading(true);
+    try {
+      const response = await fetch("/api/admin/customers", { headers: { Authorization: `Bearer ${apiToken}` } });
+      if (!response.ok) throw new Error("Unable to load customers");
+      setCustomers((await response.json()) as typeof customers);
+    } catch {
+      notify("Unable to load customers");
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    void loadCustomers();
+  }, [apiToken]);
+  return (
+    <section className="panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">CUSTOMERS</p>
+          <h2>Registered customers</h2>
+        </div>
+      </div>
+      {loading ? (
+        <p>Loading customers...</p>
+      ) : customers.length ? (
+        <div className="table-responsive" style={{ overflow: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left", padding: "10px 8px" }}>Name</th>
+                <th style={{ textAlign: "left", padding: "10px 8px" }}>Phone</th>
+                <th style={{ textAlign: "left", padding: "10px 8px" }}>Email</th>
+                <th style={{ textAlign: "left", padding: "10px 8px" }}>Joined</th>
+                <th style={{ textAlign: "left", padding: "10px 8px" }}>Orders</th>
+                <th style={{ textAlign: "left", padding: "10px 8px" }}>Spent</th>
+                <th style={{ textAlign: "left", padding: "10px 8px" }}>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {customers.map((customer) => (
+                <tr key={customer.id} style={{ borderTop: "1px solid var(--line)" }}>
+                  <td style={{ padding: "10px 8px" }}>{customer.name}</td>
+                  <td style={{ padding: "10px 8px" }}>{customer.phone || "N/A"}</td>
+                  <td style={{ padding: "10px 8px" }}>{customer.email || "N/A"}</td>
+                  <td style={{ padding: "10px 8px" }}>{customer.createdAt ? new Date(customer.createdAt).toLocaleDateString() : "N/A"}</td>
+                  <td style={{ padding: "10px 8px" }}>{customer.orderCount}</td>
+                  <td style={{ padding: "10px 8px" }}>{money(customer.totalSpent || 0)}</td>
+                  <td style={{ padding: "10px 8px" }}>{customer.status || "ACTIVE"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p>No registered customers yet.</p>
+      )}
+    </section>
   );
 }
 function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
@@ -3071,7 +3141,7 @@ function CustomerCheckout({
       `Total: ${money(order.total)}`,
     ].join("\n");
     window.open(
-      `https://wa.me/919361866771?text=${encodeURIComponent(orderMessage)}`,
+      `https://wa.me/${businessWhatsappNumber}?text=${encodeURIComponent(orderMessage)}`,
       "_blank",
     );
     setMessage("Order placed successfully");

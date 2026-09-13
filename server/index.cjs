@@ -19,15 +19,14 @@ for (const envFile of ['.env', '.env.example']) {
 }
 const port = Number(process.env.PORT || 8787);
 const jwtSecret = process.env.JWT_SECRET || 'development-only-change-me';
-let databasePath = path.resolve(root, process.env.DATABASE_PATH || 'server/data/catalog.sqlite');
+const defaultDatabasePath = process.env.DATABASE_PATH || 'server/data/catalog.sqlite';
+let databasePath = defaultDatabasePath.startsWith('/') ? defaultDatabasePath : path.resolve(root, defaultDatabasePath);
 let uploadDirectory = path.resolve(root, process.env.UPLOAD_DIR || 'server/uploads');
 
-// Handle permission issues on Render or other environments
 try {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
 } catch (err) {
   if (err.code === 'EACCES') {
-    // Fallback to project directory if /var/data is not writable
     databasePath = path.resolve(root, '.data/catalog.sqlite');
     fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   } else {
@@ -39,7 +38,6 @@ try {
   fs.mkdirSync(uploadDirectory, { recursive: true });
 } catch (err) {
   if (err.code === 'EACCES') {
-    // Fallback to project directory if /var/data is not writable
     uploadDirectory = path.resolve(root, '.data/uploads');
     fs.mkdirSync(uploadDirectory, { recursive: true });
   } else {
@@ -47,34 +45,23 @@ try {
   }
 }
 const db = new DatabaseSync(databasePath);
-db.exec(fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'));
-if (!db.prepare("PRAGMA table_info(users)").all().some((column) => column.name === 'mobile_number')) {
-  db.exec('ALTER TABLE users ADD COLUMN mobile_number TEXT');
-}
-if (db.prepare("PRAGMA table_info(addresses)").all().length && !db.prepare("PRAGMA table_info(addresses)").all().some((column) => column.name === 'gst_number')) {
-  db.exec('ALTER TABLE addresses ADD COLUMN gst_number TEXT');
-}
-if (db.prepare("PRAGMA table_info(orders)").all().length) {
-  const orderColumns = new Set(db.prepare('PRAGMA table_info(orders)').all().map((column) => column.name));
-  if (!orderColumns.has('order_number')) db.exec('ALTER TABLE orders ADD COLUMN order_number TEXT');
-  if (!orderColumns.has('customer_email')) db.exec('ALTER TABLE orders ADD COLUMN customer_email TEXT DEFAULT ""');
-  if (!orderColumns.has('customer_phone')) db.exec('ALTER TABLE orders ADD COLUMN customer_phone TEXT DEFAULT ""');
-  if (!orderColumns.has('gst_number')) db.exec('ALTER TABLE orders ADD COLUMN gst_number TEXT');
-  if (!orderColumns.has('delivery_charge')) db.exec('ALTER TABLE orders ADD COLUMN delivery_charge REAL DEFAULT 0');
-  if (!orderColumns.has('payment_method')) db.exec('ALTER TABLE orders ADD COLUMN payment_method TEXT DEFAULT "Cash on Delivery"');
-  if (!orderColumns.has('idempotency_key')) db.exec('ALTER TABLE orders ADD COLUMN idempotency_key TEXT');
-  if (!orderColumns.has('notification_status')) db.exec('ALTER TABLE orders ADD COLUMN notification_status TEXT DEFAULT "PENDING"');
-  if (!orderColumns.has('notification_sent_at')) db.exec('ALTER TABLE orders ADD COLUMN notification_sent_at TEXT');
-  if (!orderColumns.has('notification_message_id')) db.exec('ALTER TABLE orders ADD COLUMN notification_message_id TEXT');
-}
-db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_mobile_number ON users(mobile_number) WHERE mobile_number IS NOT NULL');
-db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_order_number ON orders(order_number) WHERE order_number IS NOT NULL');
+
 const now = () => new Date().toISOString();
-const normalizeMobile = (value) => String(value || '').replace(/\D/g, '').replace(/^91(?=\d{10}$)/, '');
+const normalizePhoneNumber = (value) => {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.length > 10) {
+    const stripped = digits.startsWith('91') ? digits.slice(2) : digits;
+    return stripped.replace(/^0+/, '').slice(-10);
+  }
+  return digits.replace(/^0+/, '').slice(-10);
+};
+const normalizeMobile = normalizePhoneNumber;
 const normalizeWhatsappNumber = (value) => {
   const digits = String(value || '').replace(/\D/g, '');
   if (!digits) return '';
   if (digits.length === 10) return `+91${digits}`;
+  if (digits.length === 11 && digits.startsWith('0')) return `+91${digits.slice(1)}`;
   if (digits.length === 12 && digits.startsWith('91')) return `+${digits}`;
   if (digits.startsWith('+')) return digits;
   return `+${digits}`;
@@ -98,65 +85,75 @@ const formatOrderStatusLabel = (value) => {
   };
   return labelMap[normalizeOrderStatus(value)] || 'Pending';
 };
-const ownerWhatsappNumber = normalizeWhatsappNumber(process.env.OWNER_WHATSAPP_NUMBER || '+919361866771');
-const msg91AuthKey = process.env.MSG91_AUTH_KEY || '';
-const msg91SenderId = process.env.MSG91_SENDER_ID || 'MSGIND';
-const msg91BaseUrl = process.env.MSG91_BASE_URL || 'https://api.msg91.com/api/v5/whatsapp/send';
-const mapAddress = (row) => ({ id: row.id, customerId: row.customer_id, type: row.type, fullName: row.full_name, phone: row.phone, gstNumber: row.gst_number || null, addressLine1: row.address_line1, addressLine2: row.address_line2, area: row.area, city: row.city, state: row.state, pincode: row.pincode, isDefault: Boolean(row.is_default), createdAt: row.created_at, updatedAt: row.updated_at });
-const mapOrder = (row) => {
-  const items = safeJson(row.items_json, []);
-  return {
-    id: row.id,
-    orderNumber: row.order_number || `MH-${String(Number(row.id) + 1000)}`,
-    customerId: row.customer_id,
-    customerName: row.customer_name,
-    customerEmail: row.customer_email || '',
-    customerPhone: row.customer_phone,
-    gstNumber: row.gst_number || null,
-    items,
-    subtotal: Number(row.subtotal || 0),
-    deliveryCharge: Number(row.delivery_charge || 0),
-    total: Number(row.total || 0),
-    status: normalizeOrderStatus(row.status),
-    paymentMethod: row.payment_method || 'Cash on Delivery',
-    paymentStatus: String(row.payment_status || 'PENDING'),
-    deliveryAddress: safeJson(row.delivery_address_json, {}),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    itemCount: Array.isArray(items) ? items.reduce((count, item) => count + Number(item.quantity || 0), 0) : 0,
-  };
-};
-const mapCategory = (row) => ({ ...row, parentId: row.parent_id, image: row.image_url, active: row.status === 'ACTIVE', order: row.sort_order });
-const mapBrand = (row) => ({ ...row, logoUrl: row.logo_url, active: row.status === 'ACTIVE' });
-const mapProductType = (row) => ({ ...row, categoryId: row.category_id, active: row.status === 'ACTIVE' });
-const mapAttribute = (row) => ({ ...row, categoryId: row.category_id, options: safeJson(row.options_json, []), required: Boolean(row.required), filterable: Boolean(row.filterable), searchable: Boolean(row.searchable), active: row.status === 'ACTIVE' });
-const mapProduct = (row) => ({ ...row, categoryId: row.category_id, code: row.sku, category: row.category_name, brand: row.brand_name || '', image: row.image_url || '', attributes: safeJson(row.attributes_json, {}), status: row.status === 'ACTIVE' ? 'Active' : 'Inactive' });
-const productSelect = `SELECT p.*, c.name category_name, b.name brand_name FROM products p JOIN categories c ON c.id = p.category_id LEFT JOIN brands b ON b.id = p.brand_id`;
-function seed() {
+const businessWhatsappNumber = normalizeWhatsappNumber(process.env.BUSINESS_WHATSAPP_NUMBER || process.env.OWNER_WHATSAPP_NUMBER || '+919361866771');
+
+function ensureColumn(tableName, columnName, definitionSql) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (columns.some((column) => column.name === columnName)) return;
+  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${definitionSql}`);
+}
+function backupDatabaseIfNeeded() {
+  if (!fs.existsSync(databasePath)) return;
+  const backupDir = path.join(path.dirname(databasePath), '.backups');
+  fs.mkdirSync(backupDir, { recursive: true });
+  const backupPath = path.join(backupDir, `catalog-backup-${Date.now()}.sqlite`);
+  fs.copyFileSync(databasePath, backupPath);
+  console.log('[database] Backup created', { backupPath });
+}
+function applyDatabaseMigrations() {
+  const schemaSql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+  db.exec(schemaSql);
+  ensureColumn('users', 'mobile_number', 'mobile_number TEXT');
+  ensureColumn('users', 'last_login_at', 'last_login_at TEXT');
+  ensureColumn('addresses', 'gst_number', 'gst_number TEXT');
+  ensureColumn('product_types', 'created_at', 'created_at TEXT NOT NULL DEFAULT "1970-01-01T00:00:00.000Z"');
+  ensureColumn('product_types', 'updated_at', 'updated_at TEXT NOT NULL DEFAULT "1970-01-01T00:00:00.000Z"');
+  ensureColumn('attributes', 'created_at', 'created_at TEXT NOT NULL DEFAULT "1970-01-01T00:00:00.000Z"');
+  ensureColumn('attributes', 'updated_at', 'updated_at TEXT NOT NULL DEFAULT "1970-01-01T00:00:00.000Z"');
+  if (db.prepare("PRAGMA table_info(orders)").all().length) {
+    ensureColumn('orders', 'order_number', 'order_number TEXT');
+    ensureColumn('orders', 'customer_email', 'customer_email TEXT DEFAULT ""');
+    ensureColumn('orders', 'customer_phone', 'customer_phone TEXT DEFAULT ""');
+    ensureColumn('orders', 'gst_number', 'gst_number TEXT');
+    ensureColumn('orders', 'delivery_charge', 'delivery_charge REAL DEFAULT 0');
+    ensureColumn('orders', 'payment_method', 'payment_method TEXT DEFAULT "Cash on Delivery"');
+    ensureColumn('orders', 'idempotency_key', 'idempotency_key TEXT');
+    ensureColumn('orders', 'notification_status', 'notification_status TEXT DEFAULT "PENDING"');
+    ensureColumn('orders', 'notification_sent_at', 'notification_sent_at TEXT');
+    ensureColumn('orders', 'notification_message_id', 'notification_message_id TEXT');
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_mobile_number ON users(mobile_number) WHERE mobile_number IS NOT NULL');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_order_number ON orders(order_number) WHERE order_number IS NOT NULL');
+}
+function ensureCoreAdminAccount() {
   const adminEmail = String(process.env.ADMIN_EMAIL || 'owner@murugesan.in').trim().toLowerCase();
   const adminMobile = normalizeMobile(process.env.ADMIN_MOBILE || '9361866771');
   const configuredPassword = process.env.ADMIN_PASSWORD || 'change-this-before-production';
-  const hasAdminMobileConflict = !!db.prepare('SELECT id FROM users WHERE mobile_number = ? AND role = ? AND id IS NOT ?').get(adminMobile, 'ADMIN', null);
-  let existingAdmin = db.prepare('SELECT id FROM users WHERE email = ? AND role = ?').get(adminEmail, 'ADMIN');
-  if (!existingAdmin) {
-    existingAdmin = db.prepare("SELECT id FROM users WHERE role = 'ADMIN' ORDER BY id LIMIT 1").get();
-    if (existingAdmin) db.prepare("UPDATE users SET email = ?, updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(adminEmail, now(), existingAdmin.id);
-  }
-  if (!existingAdmin) {
-    const timestamp = now();
-    db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').run('Store Owner', adminEmail, adminMobile && !hasAdminMobileConflict ? adminMobile : null, bcrypt.hashSync(configuredPassword, 12), 'ADMIN', 'ACTIVE', timestamp, timestamp);
-  } else {
-    const existingMobile = db.prepare('SELECT mobile_number FROM users WHERE id = ?').get(existingAdmin.id)?.mobile_number;
+  const existingAdmin = db.prepare('SELECT id, mobile_number FROM users WHERE email = ? AND role = ?').get(adminEmail, 'ADMIN');
+  if (existingAdmin) {
     const duplicateMobile = db.prepare('SELECT id FROM users WHERE mobile_number = ? AND id != ?').get(adminMobile, existingAdmin.id);
-    const safeAdminMobile = adminMobile && !duplicateMobile ? adminMobile : existingMobile || null;
-    db.prepare("UPDATE users SET email = ?, mobile_number = ?, status = 'ACTIVE', updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(adminEmail, safeAdminMobile, now(), existingAdmin.id);
+    const safeAdminMobile = adminMobile && !duplicateMobile ? adminMobile : existingAdmin.mobile_number || null;
+    db.prepare("UPDATE users SET mobile_number = ?, status = 'ACTIVE', updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(safeAdminMobile, now(), existingAdmin.id);
+    return;
   }
-  if (db.prepare('SELECT COUNT(*) count FROM categories').get().count > 0) return;
+  const existingFallback = db.prepare("SELECT id FROM users WHERE role = 'ADMIN' ORDER BY id LIMIT 1").get();
+  if (existingFallback) {
+    db.prepare('UPDATE users SET email = ?, mobile_number = ?, status = "ACTIVE", updated_at = ? WHERE id = ? AND role = "ADMIN"').run(adminEmail, adminMobile, now(), existingFallback.id);
+    return;
+  }
+  db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').run('Store Owner', adminEmail, adminMobile, bcrypt.hashSync(configuredPassword, 12), 'ADMIN', 'ACTIVE', now(), now());
+}
+function seedDemoData() {
+  if (process.env.SEED_DEMO_DATA !== 'true') return;
+  const categoriesCount = db.prepare('SELECT COUNT(*) count FROM categories').get().count;
+  if (categoriesCount > 0) return;
   const categoryNames = ['Electrical Switches', 'Sockets', 'Wires & Cables', 'Lighting', 'Fan Regulators', 'Electrical Accessories', 'Tools', 'Hardware', 'Plumbing Accessories', 'Other Products'];
   const categoryIds = new Map();
-  const categoryInsert = db.prepare('INSERT INTO categories (name,slug,description,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?)');
   const timestamp = now();
-  for (const [index, name] of categoryNames.entries()) categoryIds.set(name, Number(categoryInsert.run(name, slugify(name), 'Reliable products for everyday work.', index + 1, timestamp, timestamp).lastInsertRowid));
+  const categoryInsert = db.prepare('INSERT INTO categories (name,slug,description,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?)');
+  for (const [index, name] of categoryNames.entries()) {
+    categoryIds.set(name, Number(categoryInsert.run(name, slugify(name), 'Reliable products for everyday work.', index + 1, timestamp, timestamp).lastInsertRowid));
+  }
   const brandInsert = db.prepare('INSERT INTO brands (name,slug,created_at,updated_at) VALUES (?,?,?,?)');
   const anchor = Number(brandInsert.run('Anchor', 'anchor', timestamp, timestamp).lastInsertRowid);
   const products = [
@@ -168,9 +165,16 @@ function seed() {
     ['BH-650-ID', 'Impact Drill 650W', 'Tools', null, 3290, 3999, 6, 'Jobsite-ready impact drill with a 13mm chuck.', '650W / 13mm chuck'],
   ];
   const productInsert = db.prepare('INSERT INTO products (sku,name,slug,category_id,brand_id,description,details,price,mrp,stock,image_url,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
-  for (const [sku, name, category, brandId, price, mrp, stock, description, details] of products) productInsert.run(sku, name, `${slugify(name)}-${sku.toLowerCase()}`, categoryIds.get(category), brandId, description, details, price, mrp, stock, null, timestamp, timestamp);
+  for (const [sku, name, category, brandId, price, mrp, stock, description, details] of products) {
+    productInsert.run(sku, name, `${slugify(name)}-${sku.toLowerCase()}`, categoryIds.get(category), brandId, description, details, price, mrp, stock, null, timestamp, timestamp);
+  }
 }
-seed();
+backupDatabaseIfNeeded();
+applyDatabaseMigrations();
+ensureCoreAdminAccount();
+seedDemoData();
+console.log('[database] Connected', { path: databasePath, seedDemoData: process.env.SEED_DEMO_DATA === 'true' });
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
@@ -186,8 +190,8 @@ const isValidGstNumber = (value) => {
 const auth = (req, res, next) => { const token = (req.headers.authorization || '').replace(/^Bearer /, ''); try { req.user = jwt.verify(token, jwtSecret); next(); } catch { res.status(401).json({ error: 'Authentication required' }); } };
 const admin = (req, res, next) => req.user?.role === 'ADMIN' ? next() : res.status(403).json({ error: 'Admin permission required' });
 app.get('/api/health', (_req, res) => res.json({ ok: true, database: 'sqlite' }));
-app.post('/api/auth/login', (req, res) => { const rawIdentifier = String(req.body.mobile ?? req.body.email ?? req.body.username ?? '').trim(); const password = String(req.body.password || ''); const mobile = normalizeMobile(rawIdentifier); const email = rawIdentifier.includes('@') ? rawIdentifier.toLowerCase() : ''; if ((!mobilePattern.test(mobile) && !email) || !password) return res.status(400).json({ error: 'Invalid mobile number or password.' }); const user = db.prepare("SELECT * FROM users WHERE status = 'ACTIVE' AND (mobile_number = ? OR email = ?) LIMIT 1").get(mobile || null, email || null); if (!user || !bcrypt.compareSync(password, user.password_hash)) return res.status(401).json({ error: 'Invalid mobile number or password.' }); const token = jwt.sign({ id: user.id, role: user.role, email: user.email, mobile: user.mobile_number }, jwtSecret, { expiresIn: '8h' }); res.json({ token, user: { id: user.id, name: user.name, email: user.email, mobile: user.mobile_number, role: user.role } }); });
-app.post('/api/auth/register', (req, res) => { const name = String(req.body.name || '').trim(); const mobile = normalizeMobile(req.body.mobile); const password = String(req.body.password || ''); if (!name || !mobilePattern.test(mobile) || password.length < 8) return res.status(400).json({ error: 'Name, valid mobile number and an 8-character password are required' }); try { const email = `${mobile}@mobile.local`; const timestamp = now(); const result = db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').run(name, email, mobile, bcrypt.hashSync(password, 12), 'CUSTOMER', 'ACTIVE', timestamp, timestamp); const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid); const token = jwt.sign({ id: user.id, role: user.role, email: user.email, mobile: user.mobile_number }, jwtSecret, { expiresIn: '8h' }); res.status(201).json({ token, user: { id: user.id, name: user.name, email: user.email, mobile: user.mobile_number, role: user.role } }); } catch (error) { res.status(error.message.includes('UNIQUE') ? 409 : 400).json({ error: error.message.includes('UNIQUE') ? 'That mobile number is already linked to an account' : 'Unable to create customer account' }); } });
+app.post('/api/auth/login', (req, res) => { const rawIdentifier = String(req.body.mobile ?? req.body.email ?? req.body.username ?? '').trim(); const password = String(req.body.password || ''); const normalizedMobile = normalizeMobile(rawIdentifier); const email = rawIdentifier.includes('@') ? rawIdentifier.toLowerCase() : ''; if ((!mobilePattern.test(normalizedMobile) && !email) || !password) return res.status(400).json({ error: 'Invalid mobile number or password.' }); const user = db.prepare("SELECT * FROM users WHERE status = 'ACTIVE' AND ((mobile_number = ? AND mobile_number IS NOT NULL) OR email = ?) LIMIT 1").get(normalizedMobile || null, email || null); if (!user || !bcrypt.compareSync(password, user.password_hash)) return res.status(401).json({ error: 'Invalid mobile number or password.' }); db.prepare("UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?").run(now(), now(), user.id); const token = jwt.sign({ id: user.id, role: user.role, email: user.email, mobile: user.mobile_number }, jwtSecret, { expiresIn: '8h' }); res.json({ token, user: { id: user.id, name: user.name, email: user.email, mobile: user.mobile_number, role: user.role } }); });
+app.post('/api/auth/register', (req, res) => { const name = String(req.body.name || '').trim(); const mobile = normalizeMobile(req.body.mobile); const password = String(req.body.password || ''); if (!name || !mobilePattern.test(mobile) || password.length < 8) return res.status(400).json({ error: 'Name, valid mobile number and an 8-character password are required' }); try { const existingCustomer = db.prepare("SELECT id FROM users WHERE role = 'CUSTOMER' AND mobile_number = ?").get(mobile); if (existingCustomer) return res.status(409).json({ error: 'This mobile number is already registered' }); const email = `${mobile}@mobile.local`; const timestamp = now(); const result = db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at,last_login_at) VALUES (?,?,?,?,?,?,?,?,?)').run(name, email, mobile, bcrypt.hashSync(password, 12), 'CUSTOMER', 'ACTIVE', timestamp, timestamp, timestamp); const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid); const token = jwt.sign({ id: user.id, role: user.role, email: user.email, mobile: user.mobile_number }, jwtSecret, { expiresIn: '8h' }); res.status(201).json({ token, user: { id: user.id, name: user.name, email: user.email, mobile: user.mobile_number, role: user.role } }); } catch (error) { res.status(error.message.includes('UNIQUE') ? 409 : 400).json({ error: error.message.includes('UNIQUE') ? 'That mobile number is already linked to an account' : 'Unable to create customer account' }); } });
 app.get('/api/me', auth, (req, res) => { const user = db.prepare('SELECT id,name,email,mobile_number AS mobile FROM users WHERE id = ? AND role = ? AND status = ?').get(req.user.id, 'CUSTOMER', 'ACTIVE'); if (!user) return res.status(404).json({ error: 'Customer account not found' }); res.json({ id: user.id, name: user.name, email: user.email, mobile: user.mobile }); });
 app.patch('/api/me', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const name = String(req.body.name || '').trim(); if (!name) return res.status(400).json({ error: 'Full name is required' }); db.prepare('UPDATE users SET name = ?, updated_at = ? WHERE id = ? AND role = ?').run(name, now(), req.user.id, 'CUSTOMER'); res.json(db.prepare('SELECT id,name,email,mobile_number AS mobile FROM users WHERE id = ?').get(req.user.id)); });
 app.get('/api/me/addresses', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); res.json(db.prepare('SELECT * FROM addresses WHERE customer_id = ? ORDER BY is_default DESC, created_at DESC').all(req.user.id).map(mapAddress)); });
@@ -198,79 +202,30 @@ app.get('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER'
 app.get('/api/orders/:id', auth, (req, res) => { const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id)); if (!order) return res.status(404).json({ error: 'Order not found' }); const mapped = mapOrder(order); if (req.user.role === 'ADMIN' || Number(req.user.id) === Number(order.customer_id)) return res.json(mapped); return res.status(403).json({ error: 'You do not have access to this order' }); });
 app.get('/api/admin/orders', auth, admin, (_req, res) => { const rows = db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all().map(mapOrder); res.json(rows); });
 app.patch('/api/admin/orders/:id/status', auth, admin, (req, res) => { const status = normalizeOrderStatus(req.body?.status); const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id)); if (!order) return res.status(404).json({ error: 'Order not found' }); const result = db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(status, now(), Number(req.params.id)); if (!result.changes) return res.status(400).json({ error: 'Unable to update order status' }); res.json(mapOrder(db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id)))); });
-const sendOwnerWhatsAppNotification = async (order) => {
-  const ownerNumber = ownerWhatsappNumber;
-  if (!ownerNumber || !msg91AuthKey) {
-    console.warn('WhatsApp notification skipped: OWNER_WHATSAPP_NUMBER and MSG91_AUTH_KEY must be configured.');
-    return { ok: false, skipped: true, reason: 'missing configuration' };
-  }
-  const items = Array.isArray(order.items) ? order.items : [];
-  const itemSummary = items.length
-    ? items.map((item, index) => `${index + 1}. ${item.productName || item.name || 'Item'} × ${item.quantity} — ${money(item.unitPrice ?? item.price ?? 0)}`).join('\n')
-    : 'No items available';
-  const message = [
-    '🛒 NEW ORDER RECEIVED',
-    '',
-    'Murugesan Electrical and Hardwares',
-    `Order ID: ${order.orderNumber}`,
-    `Customer: ${order.customerName || 'Customer'}`,
-    `Mobile: ${order.customerPhone || 'Not available'}`,
-    '',
-    'Items:',
-    itemSummary,
-    '',
-    `Total: ${money(order.total)}`,
-    `Status: ${formatOrderStatusLabel(order.status || 'PENDING')}`,
-    '',
-    `Address: ${typeof order.deliveryAddress === 'object' && order.deliveryAddress ? [order.deliveryAddress.addressLine1, order.deliveryAddress.area, order.deliveryAddress.city, order.deliveryAddress.state, order.deliveryAddress.pincode].filter(Boolean).join(', ') : 'Delivery address unavailable'}`,
-    '',
-    'Please open the owner dashboard to manage this order.',
-  ].join('\n');
-  const payload = {
-    authkey: msg91AuthKey,
-    mobiles: ownerNumber.replace(/\D/g, ''),
-    message,
-    sender: msg91SenderId,
-    route: '4',
-    country: '91',
-  };
-  try {
-    const response = await fetch(msg91BaseUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const text = await response.text();
-    let result = {};
-    try { result = JSON.parse(text); } catch { result = { raw: text }; }
-    if (!response.ok) {
-      console.error('MSG91 WhatsApp notification failed', {
-        orderId: order.id,
-        status: response.status,
-        response: result,
-      });
-      return { ok: false, skipped: false, reason: 'provider error', response: result };
-    }
-    console.log('MSG91 WhatsApp notification accepted', {
-      orderId: order.id,
-      status: response.status,
-      response: result,
-    });
-    return {
-      ok: true,
-      skipped: false,
-      messageId: result?.messageId || result?.message_id || result?.requestId || null,
-      response: result,
-    };
-  } catch (error) {
-    console.error('MSG91 WhatsApp notification raised an exception', {
-      orderId: order.id,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return { ok: false, skipped: false, reason: 'network error' };
-  }
-};
-app.post('/api/me/orders', auth, async (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; const address = db.prepare('SELECT * FROM addresses WHERE id = ? AND customer_id = ?').get(Number(body.addressId), req.user.id); const user = db.prepare('SELECT id,name,email,mobile_number FROM users WHERE id = ?').get(req.user.id); if (!address || !user || !Array.isArray(body.items) || !body.items.length) return res.status(400).json({ error: 'A delivery address and cart items are required' }); const gstNumber = normalizeGstNumber(body.gstNumber ?? body.gst_number ?? address.gst_number ?? ''); if (gstNumber && !isValidGstNumber(gstNumber)) return res.status(400).json({ error: 'Please enter a valid GST number.' }); const normalizedItems = body.items.map((item) => ({ productId: Number(item.productId), name: String(item.name || '').trim(), quantity: Number(item.quantity || 0), price: Number(item.price || 0) })).filter((item) => item.productId && item.name && item.quantity > 0 && Number.isFinite(item.price)); if (!normalizedItems.length) return res.status(400).json({ error: 'Order items are invalid' }); const productIds = normalizedItems.map((item) => item.productId);
+app.get('/api/admin/customers', auth, admin, (_req, res) => {
+  const rows = db.prepare(`
+    SELECT u.id, u.name, u.email, u.mobile_number, u.status, u.created_at, u.last_login_at,
+      COUNT(o.id) AS order_count,
+      COALESCE(SUM(o.total), 0) AS total_spent
+    FROM users u
+    LEFT JOIN orders o ON o.customer_id = u.id
+    WHERE u.role = 'CUSTOMER'
+    GROUP BY u.id, u.name, u.email, u.mobile_number, u.status, u.created_at, u.last_login_at
+    ORDER BY u.created_at DESC
+  `).all().map((row) => ({
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    phone: row.mobile_number,
+    status: row.status,
+    createdAt: row.created_at,
+    lastLogin: row.last_login_at,
+    orderCount: Number(row.order_count || 0),
+    totalSpent: Number(row.total_spent || 0),
+  }));
+  res.json(rows);
+});
+app.post('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; const address = db.prepare('SELECT * FROM addresses WHERE id = ? AND customer_id = ?').get(Number(body.addressId), req.user.id); const user = db.prepare('SELECT id,name,email,mobile_number FROM users WHERE id = ?').get(req.user.id); if (!address || !user || !Array.isArray(body.items) || !body.items.length) return res.status(400).json({ error: 'A delivery address and cart items are required' }); const gstNumber = normalizeGstNumber(body.gstNumber ?? body.gst_number ?? address.gst_number ?? ''); if (gstNumber && !isValidGstNumber(gstNumber)) return res.status(400).json({ error: 'Please enter a valid GST number.' }); const normalizedItems = body.items.map((item) => ({ productId: Number(item.productId), name: String(item.name || '').trim(), quantity: Number(item.quantity || 0), price: Number(item.price || 0) })).filter((item) => item.productId && item.name && item.quantity > 0 && Number.isFinite(item.price)); if (!normalizedItems.length) return res.status(400).json({ error: 'Order items are invalid' }); const productIds = normalizedItems.map((item) => item.productId);
   const placeholders = productIds.map(() => '?').join(',');
   const catalog = db.prepare(`SELECT * FROM products WHERE id IN (${placeholders})`).all(...productIds);
   const catalogMap = new Map(catalog.map((product) => [product.id, product]));
@@ -302,7 +257,7 @@ app.post('/api/me/orders', auth, async (req, res) => { if (req.user.role !== 'CU
   if (existing) return res.status(200).json(mapOrder(existing));
   db.exec('BEGIN');
   try {
-    const result = db.prepare('INSERT INTO orders (order_number,customer_id,customer_name,customer_email,customer_phone,gst_number,items_json,subtotal,delivery_charge,total,status,payment_method,payment_status,delivery_address_json,idempotency_key,notification_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(orderNumber, req.user.id, user.name, user.email || `${user.mobile_number}@mobile.local`, address.phone, gstNumber || null, JSON.stringify(snapshotItems), subtotal, deliveryCharge, total, 'PENDING', 'Cash on Delivery', 'PENDING', JSON.stringify(snapshot), idempotencyKey, 'PENDING', timestamp, timestamp);
+    const result = db.prepare('INSERT INTO orders (order_number,customer_id,customer_name,customer_email,customer_phone,gst_number,items_json,subtotal,delivery_charge,total,status,payment_method,payment_status,delivery_address_json,idempotency_key,notification_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(orderNumber, req.user.id, user.name, user.email || `${user.mobile_number}@mobile.local`, address.phone, gstNumber || null, JSON.stringify(snapshotItems), subtotal, deliveryCharge, total, 'PENDING', 'Cash on Delivery', 'PENDING', JSON.stringify(snapshot), idempotencyKey, 'SENT', timestamp, timestamp);
     const orderId = Number(result.lastInsertRowid);
     const orderItemInsert = db.prepare('INSERT INTO order_items (order_id,product_id,product_name,product_image,quantity,unit_price,total_price,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)');
     for (const item of snapshotItems) {
@@ -310,13 +265,7 @@ app.post('/api/me/orders', auth, async (req, res) => { if (req.user.role !== 'CU
     }
     db.exec('COMMIT');
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
-    const mappedOrder = mapOrder(order);
-    const notification = await sendOwnerWhatsAppNotification(mappedOrder);
-    const notificationStatus = notification.ok ? 'SENT' : 'FAILED';
-    const messageId = notification.messageId || null;
-    const sentAt = notification.ok ? now() : null;
-    db.prepare('UPDATE orders SET notification_status = ?, notification_sent_at = ?, notification_message_id = ?, updated_at = ? WHERE id = ?').run(notificationStatus, sentAt, messageId, now(), orderId);
-    res.status(201).json(mapOrder(db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId)));
+    res.status(201).json(mapOrder(order));
   } catch (error) {
     db.exec('ROLLBACK');
     if (String(error.message).includes('UNIQUE')) {
