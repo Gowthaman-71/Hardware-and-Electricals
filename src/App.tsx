@@ -1,3 +1,4 @@
+type ImportError = { row: number; sku: string; field: string; message: string };
 function DynamicCategoryManager({
   categories,
   setCategories,
@@ -685,6 +686,12 @@ const businessWhatsappNumber = String(
 const image = (id: string) =>
   `https://images.unsplash.com/${id}?auto=format&fit=crop&w=900&q=82`;
 const money = (value: number) => `₹${value.toLocaleString("en-IN")}`;
+const normalizeProductStock = (value: unknown): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && Number.isInteger(parsed) && parsed >= 0
+    ? parsed
+    : 0;
+};
 const statusOf = (stock: number) =>
   stock === 0 ? "Out of stock" : stock < 10 ? "Low stock" : "In stock";
 async function loadCatalog(): Promise<{
@@ -714,10 +721,11 @@ async function saveProductRequest(
 ): Promise<Product> {
   const categoryId = product.categoryId || categories.find((item) => item.name === product.category)?.id;
   if (!product.code.trim() || !product.name.trim() || !categoryId) throw new Error("Product code, name and category are required");
+  const sanitizedStock = normalizeProductStock(product.stock);
   const response = await fetch(product.id ? `/api/products/${product.id}` : "/api/products", {
     method: product.id ? "PATCH" : "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ sku: product.code.trim(), name: product.name.trim(), categoryId, brand: product.brand, description: product.description, details: product.details, price: product.price, mrp: product.mrp || product.price, stock: product.stock, unit: product.unit, imageUrl: product.image || null, attributes: product.attributes || {}, status: product.status === "Inactive" ? "INACTIVE" : "ACTIVE" }),
+    body: JSON.stringify({ sku: product.code.trim(), name: product.name.trim(), categoryId, brand: product.brand, description: product.description, details: product.details, price: product.price, mrp: product.mrp || product.price, stock: sanitizedStock, unit: product.unit, imageUrl: product.image || null, attributes: product.attributes || {}, status: product.status === "Inactive" ? "INACTIVE" : "ACTIVE" }),
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result.error || "Unable to save product");
@@ -1842,7 +1850,6 @@ function Login({
     </main>
   );
 }
-type ImportError = { row: number; sku: string; field: string; message: string };
 type ImportItem = {
   row: number;
   raw: Record<string, string>;
@@ -1887,18 +1894,19 @@ function makeProduct(
   categories: Category[],
 ): Product {
   const value = (name: string) => raw[headerKey(name)] || "";
-  const category = value("Category") || "Other Products";
+  const valueAny = (...names: string[]) => names.map((name) => value(name)).find(Boolean) || "";
+  const category = value("Category");
   return {
     id: Date.now() + row,
     name: value("Product Name"),
     code: value("SKU") || value("Product Code"),
     category,
     brand: value("Brand"),
-    price: Number(value("Price")),
-    mrp: Number(value("MRP")) || Number(value("Price")),
-    stock: Number(value("Stock")),
+    price: Number(valueAny("Price", "Price (₹)")),
+    mrp: Number(valueAny("MRP", "MRP (₹)")) || Number(valueAny("Price", "Price (₹)")),
+    stock: Number(valueAny("Stock", "Stock Qty")),
     unit: value("Unit") || "Nos",
-    image: value("Image 1") || fallbackImage,
+    image: valueAny("Image URL", "Image 1"),
     description: value("Description"),
     details: value("Product Type"),
     status:
@@ -2011,24 +2019,79 @@ function BulkProductImport({
       )
     )
       return;
+
     const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
-    const next = [...products];
+    if (!apiToken) {
+      notify("Admin login is required to import products.");
+      return;
+    }
+
+    const payload = {
+      duplicateMode,
+      products: items.map(({ row, product }) => {
+        const categoryId =
+          product.categoryId ||
+          categories.find(
+            (category) =>
+              category.name.toLowerCase() === product.category.toLowerCase(),
+          )?.id;
+        return {
+          row,
+          product: {
+            ...product,
+            sku: product.code,
+            code: product.code,
+            categoryId,
+            category: product.category,
+            productType: product.details || "",
+            imageUrl: product.image || null,
+            imageUrls: product.image ? [product.image] : [],
+            status: product.status === "Inactive" ? "INACTIVE" : "ACTIVE",
+            attributes: product.attributes || {},
+            brand: product.brand || "",
+          },
+        };
+      }),
+    };
+
     try {
-      for (const { product } of items) {
-        const existing = next.findIndex(
-        (item) => item.code.toLowerCase() === product.code.toLowerCase(),
+      const response = await fetch("/api/products/bulk-import", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiToken}`,
+        },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(
+          result && typeof result.error === "string"
+            ? result.error
+            : "Unable to import products.",
         );
-        if (existing >= 0 && duplicateMode === "skip") continue;
-        const saved = await saveProductRequest(apiToken, existing >= 0 ? { ...next[existing], ...product, id: next[existing].id } : { ...product, id: 0 }, categories);
-        if (existing >= 0) next[existing] = saved;
-        else next.unshift(saved);
-        setProducts([...next]);
       }
-      notify(`${items.length} products imported successfully`);
+
+      const imported = Number(result.imported || 0);
+      const skipped = Number(result.skipped || 0);
+      const failed = Number(result.failed || 0);
+      const nextCatalog = await loadCatalog();
+      setProducts(nextCatalog.products);
+      notify(
+        imported > 0
+          ? `Import complete: ${imported} added${skipped ? `, ${skipped} skipped` : ""}${failed ? `, ${failed} failed` : ""}.`
+          : skipped > 0
+            ? `No new products created. ${skipped} existing SKU${skipped === 1 ? "" : "s"} were skipped.`
+            : "Bulk import finished without creating products.",
+      );
       setItems([]);
       setErrors([]);
     } catch (reason) {
-      notify(reason instanceof Error ? reason.message : "Unable to import products. Please try again.");
+      notify(
+        reason instanceof Error
+          ? reason.message
+          : "Unable to import products. Please try again.",
+      );
     }
   };
   const downloadErrors = () => {
@@ -2863,7 +2926,12 @@ function ProductForm({
           e.preventDefault();
           if (form.name.trim() && form.code.trim() && form.price > 0) {
             setSaving(true);
-            Promise.resolve(onSave({ ...form, image: form.image || fallbackImage })).finally(() => setSaving(false));
+            const nextProduct = {
+              ...form,
+              stock: normalizeProductStock(form.stock),
+              image: form.image || fallbackImage,
+            };
+            Promise.resolve(onSave(nextProduct)).finally(() => setSaving(false));
           }
         }}
       >

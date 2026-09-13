@@ -317,6 +317,10 @@ const normalizeWhatsappNumber = (value) => {
 };
 const slugify = (value) => value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 const safeJson = (value, fallback) => { try { return JSON.parse(value); } catch { return fallback; } };
+const normalizeStockValue = (value) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
+};
 const validOrderStatuses = new Set(['PENDING', 'CONFIRMED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED']);
 const allowedOrderTransitions = {
   PENDING: new Set(['CONFIRMED', 'CANCELLED']),
@@ -992,8 +996,90 @@ app.patch('/api/attributes/:id/archive', auth, admin, (req, res) => { const id =
 app.patch('/api/attributes/:id/restore', auth, admin, (req, res) => { const result = db.prepare("UPDATE attributes SET status = 'ACTIVE', updated_at = ? WHERE id = ?").run(now(), Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Attribute not found' }); res.json({ restored: true }); });
 app.post('/api/migration/legacy', auth, admin, (req, res) => { const categories = Array.isArray(req.body?.categories) ? req.body.categories : []; const products = Array.isArray(req.body?.products) ? req.body.products : []; const timestamp = now(); try { db.exec('BEGIN'); const categoryInsert = db.prepare('INSERT OR IGNORE INTO categories (name,slug,description,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?)'); for (const [index, category] of categories.entries()) categoryInsert.run(String(category.name || '').trim(), slugify(category.slug || category.name || `legacy-${index}`), category.description || '', Number(category.order || index + 1), timestamp, timestamp); const categoryId = db.prepare('SELECT id FROM categories WHERE name = ? COLLATE NOCASE'); const brandInsert = db.prepare('INSERT OR IGNORE INTO brands (name,slug,created_at,updated_at) VALUES (?,?,?,?)'); const brandId = db.prepare('SELECT id FROM brands WHERE name = ? COLLATE NOCASE'); const productInsert = db.prepare('INSERT OR IGNORE INTO products (sku,name,slug,category_id,brand_id,description,details,price,mrp,stock,unit,image_url,attributes_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'); for (const product of products) { const categoryRow = categoryId.get(String(product.category || 'Other Products')); if (!categoryRow) continue; const brandName = String(product.brand || '').trim(); if (brandName) brandInsert.run(brandName, slugify(brandName), timestamp, timestamp); const brandRow = brandName ? brandId.get(brandName) : null; const sku = String(product.code || product.sku || '').trim(); if (!sku) continue; productInsert.run(sku, String(product.name || sku), slugify(`${product.name || sku}-${sku}`), categoryRow.id, brandRow?.id || null, product.description || '', product.details || '', Number(product.price || 0), Number(product.mrp || product.price || 0), Number(product.stock || 0), product.unit || 'Nos', product.image || null, JSON.stringify(product.attributes || {}), timestamp, timestamp); } db.exec('COMMIT'); res.json({ migrated: { categories: categories.length, products: products.length } }); } catch (error) { db.exec('ROLLBACK'); res.status(400).json({ error: 'Migration failed', detail: error.message }); } });
 app.get('/api/products', (req, res) => { const page = Math.max(1, Number(req.query.page || 1)); const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50))); const search = String(req.query.search || '').trim(); const params = []; const filters = ["p.status = 'ACTIVE'"]; if (search) { filters.push('(p.name LIKE ? OR p.sku LIKE ? OR c.name LIKE ? OR b.name LIKE ?)'); params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`); } if (req.query.categoryId) { filters.push('p.category_id = ?'); params.push(Number(req.query.categoryId)); } const where = ` WHERE ${filters.join(' AND ')}`; const total = db.prepare(`SELECT COUNT(*) count FROM products p JOIN categories c ON c.id = p.category_id LEFT JOIN brands b ON b.id = p.brand_id${where}`).get(...params).count; const rows = db.prepare(`${productSelect}${where} ORDER BY p.created_at DESC LIMIT ? OFFSET ?`).all(...params, limit, (page - 1) * limit).map(mapProduct); res.json({ data: rows, page, limit, total, pages: Math.ceil(total / limit) }); });
-app.post('/api/products', auth, admin, (req, res) => { const body = req.body || {}; const sku = String(body.sku || '').trim(); const name = String(body.name || '').trim(); const categoryId = Number(body.categoryId); const price = Number(body.price); const stock = Number(body.stock ?? 0); if (!sku || !name || !categoryId || !Number.isFinite(price) || price < 0 || !Number.isInteger(stock) || stock < 0) return res.status(400).json({ error: 'SKU, product name, category, valid price and stock are required' }); const timestamp = now(); try { const brandId = body.brandId || db.prepare('SELECT id FROM brands WHERE name = ? COLLATE NOCASE').get(String(body.brand || '').trim())?.id || null; const result = db.prepare('INSERT INTO products (sku,name,slug,category_id,brand_id,product_type_id,description,details,price,mrp,discount,stock,unit,image_url,image_urls_json,attributes_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(sku, name, slugify(`${name}-${sku}`), categoryId, brandId, body.productTypeId || null, body.description || '', body.details || '', price, Number(body.mrp || price), Number(body.discount || 0), stock, body.unit || 'Nos', body.imageUrl || null, JSON.stringify(body.imageUrls || []), JSON.stringify(body.attributes || {}), body.status || 'ACTIVE', timestamp, timestamp); const product = mapProduct(db.prepare(`${productSelect} WHERE p.id = ?`).get(result.lastInsertRowid)); if (!product) return res.status(500).json({ error: 'Product persisted but could not be loaded' }); res.status(201).json(product); } catch (error) { res.status(error.message.includes('UNIQUE') ? 409 : 400).json({ error: error.message.includes('UNIQUE') ? 'SKU already exists' : 'Unable to create product' }); } });
-app.patch('/api/products/:id', auth, admin, (req, res) => { const body = req.body || {}; const id = Number(req.params.id); const current = db.prepare('SELECT * FROM products WHERE id = ?').get(id); if (!current) return res.status(404).json({ error: 'Product not found' }); const values = { name: body.name == null ? current.name : String(body.name).trim(), categoryId: body.categoryId == null ? current.category_id : Number(body.categoryId), price: body.price == null ? current.price : Number(body.price), stock: body.stock == null ? current.stock : Number(body.stock) }; if (!values.name || !values.categoryId || !Number.isFinite(values.price) || values.price < 0 || !Number.isInteger(values.stock) || values.stock < 0) return res.status(400).json({ error: 'Invalid product data' }); const timestamp = now(); try { const brandId = body.brandId || db.prepare('SELECT id FROM brands WHERE name = ? COLLATE NOCASE').get(String(body.brand || '').trim())?.id || current.brand_id; db.prepare('UPDATE products SET name = ?, category_id = ?, brand_id = ?, product_type_id = ?, description = ?, details = ?, price = ?, mrp = ?, discount = ?, stock = ?, unit = ?, image_url = ?, image_urls_json = ?, attributes_json = ?, status = ?, updated_at = ? WHERE id = ?').run(values.name, values.categoryId, brandId, body.productTypeId ?? current.product_type_id, body.description ?? current.description, body.details ?? current.details, values.price, body.mrp ?? current.mrp, body.discount ?? current.discount, values.stock, body.unit ?? current.unit, body.imageUrl ?? current.image_url, JSON.stringify(body.imageUrls ?? safeJson(current.image_urls_json, [])), JSON.stringify(body.attributes ?? safeJson(current.attributes_json, {})), body.status ?? current.status, timestamp, id); const product = mapProduct(db.prepare(`${productSelect} WHERE p.id = ?`).get(id)); if (!product) return res.status(500).json({ error: 'Product updated but could not be reloaded' }); res.json(product); } catch { res.status(400).json({ error: 'Unable to update product' }); } });
+app.post('/api/products/bulk-import', auth, admin, (req, res) => {
+  const rows = Array.isArray(req.body?.products) ? req.body.products : [];
+  const duplicateMode = req.body?.duplicateMode === 'update' ? 'update' : 'skip';
+  if (!rows.length) return res.status(400).json({ error: 'At least one product is required' });
+  const results = [];
+  const validRows = [];
+  const seenSkus = new Set();
+  for (const entry of rows) {
+    const row = Number(entry?.row || 0);
+    const product = entry?.product && typeof entry.product === 'object' ? entry.product : entry;
+    const sku = String(product?.sku || product?.code || '').trim();
+    const name = String(product?.name || '').trim();
+    const categoryId = Number(product?.categoryId);
+    const price = Number(product?.price);
+    const stock = Number(product?.stock ?? 0);
+    const errors = [];
+    const normalizedSku = sku.toLowerCase();
+    if (!sku) errors.push('Missing SKU');
+    if (seenSkus.has(normalizedSku)) errors.push('Duplicate SKU in this file');
+    if (sku) seenSkus.add(normalizedSku);
+    if (!name) errors.push('Missing product name');
+    if (!Number.isInteger(categoryId) || categoryId <= 0) errors.push('Invalid category');
+    if (!Number.isFinite(price) || price < 0) errors.push('Invalid price');
+    if (!Number.isInteger(stock) || stock < 0) errors.push('Invalid stock');
+    const discount = Number(product?.discount ?? 0);
+    if (!Number.isFinite(discount) || discount < 0 || discount > 100) errors.push('Invalid discount');
+    const status = String(product?.status || 'ACTIVE').toUpperCase();
+    if (!['ACTIVE', 'INACTIVE', 'ARCHIVED'].includes(status)) errors.push('Invalid status');
+    const category = Number.isInteger(categoryId) ? db.prepare("SELECT id FROM categories WHERE id = ? AND status != 'ARCHIVED'").get(categoryId) : null;
+    if (!category) errors.push('Category not found');
+    if (errors.length) {
+      results.push({ row, sku, status: 'failed', reason: errors.join('; ') });
+      continue;
+    }
+    validRows.push({ row, sku, name, categoryId, price, stock, discount, status, product });
+  }
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    const timestamp = now();
+    const findProduct = db.prepare('SELECT * FROM products WHERE LOWER(sku) = LOWER(?) LIMIT 1');
+    const insertProduct = db.prepare('INSERT INTO products (sku,name,slug,category_id,brand_id,product_type_id,description,details,price,mrp,discount,stock,unit,image_url,image_urls_json,attributes_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    const updateProduct = db.prepare('UPDATE products SET name = ?, category_id = ?, brand_id = ?, product_type_id = ?, description = ?, details = ?, price = ?, mrp = ?, discount = ?, stock = ?, unit = ?, image_url = ?, image_urls_json = ?, attributes_json = ?, status = ?, updated_at = ? WHERE id = ?');
+    for (const item of validRows) {
+      const existing = findProduct.get(item.sku);
+      if (existing && duplicateMode === 'skip') {
+        results.push({ row: item.row, sku: item.sku, status: 'skipped', reason: 'SKU already exists' });
+        continue;
+      }
+      const product = item.product;
+      const brandName = String(product.brand || '').trim();
+      const brand = brandName ? db.prepare('SELECT id FROM brands WHERE LOWER(name) = LOWER(?) LIMIT 1').get(brandName) : null;
+      const productTypeName = String(product.productType || '').trim();
+      const productType = productTypeName ? db.prepare('SELECT id FROM product_types WHERE category_id = ? AND LOWER(name) = LOWER(?) LIMIT 1').get(item.categoryId, productTypeName) : null;
+      if (brandName && !brand) {
+        results.push({ row: item.row, sku: item.sku, status: 'failed', reason: `Brand "${brandName}" not found` });
+        continue;
+      }
+      if (productTypeName && !productType) {
+        results.push({ row: item.row, sku: item.sku, status: 'failed', reason: `Product type "${productTypeName}" not found for category` });
+        continue;
+      }
+      const values = [item.name, item.categoryId, brand?.id || null, productType?.id || null, String(product.description || ''), String(product.details || ''), item.price, Number(product.mrp || item.price), item.discount, item.stock, String(product.unit || 'Nos'), product.imageUrl || product.image || null, JSON.stringify(Array.isArray(product.imageUrls) ? product.imageUrls : []), JSON.stringify(product.attributes || {}), item.status];
+      const insertValues = values.slice(1);
+      if (existing) {
+        updateProduct.run(...values, timestamp, existing.id);
+        results.push({ row: item.row, sku: item.sku, status: 'updated', productId: Number(existing.id) });
+      } else {
+        insertProduct.run(item.sku, item.name, slugify(`${item.name}-${item.sku}`), ...insertValues, timestamp, timestamp);
+        results.push({ row: item.row, sku: item.sku, status: 'imported' });
+      }
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* transaction already closed */ }
+    console.error('[api/products/bulk-import]', error && error.stack ? error.stack : error);
+    return res.status(500).json({ error: 'Unable to persist imported products' });
+  }
+  const imported = results.filter((result) => result.status === 'imported' || result.status === 'updated').length;
+  const skipped = results.filter((result) => result.status === 'skipped').length;
+  const failed = results.filter((result) => result.status === 'failed').length;
+  res.json({ success: true, total: rows.length, imported, skipped, failed, results });
+});
+app.post('/api/products', auth, admin, (req, res) => { const body = req.body || {}; const sku = String(body.sku || '').trim(); const name = String(body.name || '').trim(); const categoryId = Number(body.categoryId); const price = Number(body.price); const stock = normalizeStockValue(body.stock); if (!sku || !name || !categoryId || !Number.isFinite(price) || price < 0 || !Number.isInteger(stock) || stock < 0) return res.status(400).json({ error: 'SKU, product name, category, valid price and stock are required' }); const timestamp = now(); try { const brandId = body.brandId || db.prepare('SELECT id FROM brands WHERE name = ? COLLATE NOCASE').get(String(body.brand || '').trim())?.id || null; const result = db.prepare('INSERT INTO products (sku,name,slug,category_id,brand_id,product_type_id,description,details,price,mrp,discount,stock,unit,image_url,image_urls_json,attributes_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(sku, name, slugify(`${name}-${sku}`), categoryId, brandId, body.productTypeId || null, body.description || '', body.details || '', price, Number(body.mrp || price), Number(body.discount || 0), stock, body.unit || 'Nos', body.imageUrl || null, JSON.stringify(body.imageUrls || []), JSON.stringify(body.attributes || {}), body.status || 'ACTIVE', timestamp, timestamp); const product = mapProduct(db.prepare(`${productSelect} WHERE p.id = ?`).get(result.lastInsertRowid)); if (!product) return res.status(500).json({ error: 'Product persisted but could not be loaded' }); res.status(201).json(product); } catch (error) { res.status(error.message.includes('UNIQUE') ? 409 : 400).json({ error: error.message.includes('UNIQUE') ? 'SKU already exists' : 'Unable to create product' }); } });
+app.patch('/api/products/:id', auth, admin, (req, res) => { const body = req.body || {}; const id = Number(req.params.id); const current = db.prepare('SELECT * FROM products WHERE id = ?').get(id); if (!current) return res.status(404).json({ error: 'Product not found' }); const values = { name: body.name == null ? current.name : String(body.name).trim(), categoryId: body.categoryId == null ? current.category_id : Number(body.categoryId), price: body.price == null ? current.price : Number(body.price), stock: body.stock == null ? current.stock : normalizeStockValue(body.stock) }; if (!values.name || !values.categoryId || !Number.isFinite(values.price) || values.price < 0 || !Number.isInteger(values.stock) || values.stock < 0) return res.status(400).json({ error: 'Invalid product data' }); const timestamp = now(); try { const brandId = body.brandId || db.prepare('SELECT id FROM brands WHERE name = ? COLLATE NOCASE').get(String(body.brand || '').trim())?.id || current.brand_id; db.prepare('UPDATE products SET name = ?, category_id = ?, brand_id = ?, product_type_id = ?, description = ?, details = ?, price = ?, mrp = ?, discount = ?, stock = ?, unit = ?, image_url = ?, image_urls_json = ?, attributes_json = ?, status = ?, updated_at = ? WHERE id = ?').run(values.name, values.categoryId, brandId, body.productTypeId ?? current.product_type_id, body.description ?? current.description, body.details ?? current.details, values.price, body.mrp ?? current.mrp, body.discount ?? current.discount, values.stock, body.unit ?? current.unit, body.imageUrl ?? current.image_url, JSON.stringify(body.imageUrls ?? safeJson(current.image_urls_json, [])), JSON.stringify(body.attributes ?? safeJson(current.attributes_json, {})), body.status ?? current.status, timestamp, id); const product = mapProduct(db.prepare(`${productSelect} WHERE p.id = ?`).get(id)); if (!product) return res.status(500).json({ error: 'Product updated but could not be reloaded' }); res.json(product); } catch { res.status(400).json({ error: 'Unable to update product' }); } });
 app.patch('/api/products/:id/archive', auth, admin, (req, res) => { const result = db.prepare("UPDATE products SET status = 'ARCHIVED', updated_at = ? WHERE id = ?").run(now(), Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Product not found' }); res.status(204).end(); });
 app.post('/api/images', auth, admin, upload.single('image'), (req, res) => { if (!req.file) return res.status(400).json({ error: 'Image is required' }); const safeName = path.basename(req.file.originalname || 'upload').replace(/[^a-zA-Z0-9._-]/g, '_'); const safePath = path.join(uploadDirectory, `${Date.now()}-${safeName}`); fs.renameSync(req.file.path, safePath); res.status(201).json({ url: `/uploads/${path.basename(safePath)}` }); });
 app.get('/api/admin/stats', auth, admin, (_req, res) => { const count = (sql) => db.prepare(sql).get().count; res.json({ products: count("SELECT COUNT(*) count FROM products WHERE status != 'ARCHIVED'"), categories: count("SELECT COUNT(*) count FROM categories WHERE status != 'ARCHIVED'"), brands: count("SELECT COUNT(*) count FROM brands WHERE status != 'ARCHIVED'"), customers: count("SELECT COUNT(*) count FROM users WHERE role = 'CUSTOMER'"), orders: count('SELECT COUNT(*) count FROM orders'), revenue: Number(db.prepare('SELECT COALESCE(SUM(total), 0) total FROM orders').get().total || 0) }); });
