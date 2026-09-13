@@ -19,6 +19,22 @@ services:
         value: +919361866771
       - key: VITE_BUSINESS_WHATSAPP_NUMBER
         value: +919361866771
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_BUSINESS_ACCOUNT_ID
+        sync: false
+      - key: WHATSAPP_API_VERSION
+        value: v23.0
+      - key: WHATSAPP_OWNER_NUMBER
+        sync: false
+      - key: WHATSAPP_NEW_ORDER_TEMPLATE
+        sync: false
+      - key: WHATSAPP_ORDER_CONFIRMED_TEMPLATE
+        sync: false
+      - key: WHATSAPP_TEMPLATE_LANGUAGE
+        value: en_US
       - key: SEED_DEMO_DATA
         value: "false"
       - key: DATABASE_URL

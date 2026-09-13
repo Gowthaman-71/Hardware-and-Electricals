@@ -241,8 +241,16 @@ const runProductionSchemaSetup = () => {
       type TEXT NOT NULL,
       channel TEXT NOT NULL CHECK (channel = 'WHATSAPP'),
       message TEXT NOT NULL,
+      recipient TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      provider_message_id TEXT,
+      error_message TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`,
+    `ALTER TABLE order_notifications ADD COLUMN IF NOT EXISTS recipient TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE order_notifications ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'PENDING'`,
+    `ALTER TABLE order_notifications ADD COLUMN IF NOT EXISTS provider_message_id TEXT`,
+    `ALTER TABLE order_notifications ADD COLUMN IF NOT EXISTS error_message TEXT`,
     `CREATE TABLE IF NOT EXISTS settings (
       id SERIAL PRIMARY KEY,
       key TEXT NOT NULL UNIQUE,
@@ -331,7 +339,8 @@ const allowedOrderTransitions = {
   CANCELLED: new Set(),
 };
 const notificationTypeForStatus = {
-  CONFIRMED: 'ORDER_CONFIRMED',
+  PENDING: 'NEW_ORDER_OWNER',
+  CONFIRMED: 'ORDER_CONFIRMED_CUSTOMER',
   PROCESSING: 'ORDER_PROCESSING',
   OUT_FOR_DELIVERY: 'ORDER_OUT_FOR_DELIVERY',
   DELIVERED: 'ORDER_DELIVERED',
@@ -353,7 +362,17 @@ const formatOrderStatusLabel = (value) => {
   };
   return labelMap[normalizeOrderStatus(value) || 'PENDING'] || 'Pending';
 };
-const businessWhatsappNumber = normalizeWhatsappNumber(process.env.BUSINESS_WHATSAPP_NUMBER || process.env.OWNER_WHATSAPP_NUMBER || '+919361866771');
+const whatsappConfig = {
+  accessToken: String(process.env.WHATSAPP_ACCESS_TOKEN || '').trim(),
+  phoneNumberId: String(process.env.WHATSAPP_PHONE_NUMBER_ID || '').trim(),
+  businessAccountId: String(process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || '').trim(),
+  apiVersion: String(process.env.WHATSAPP_API_VERSION || 'v23.0').trim(),
+  ownerNumber: normalizeWhatsappNumber(process.env.WHATSAPP_OWNER_NUMBER || ''),
+  newOrderTemplate: String(process.env.WHATSAPP_NEW_ORDER_TEMPLATE || '').trim(),
+  confirmedTemplate: String(process.env.WHATSAPP_ORDER_CONFIRMED_TEMPLATE || '').trim(),
+  language: String(process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en_US').trim(),
+};
+const businessWhatsappNumber = whatsappConfig.ownerNumber;
 const formatCurrency = (value) => `₹${Number(value || 0).toLocaleString('en-IN')}`;
 const formatOrderAddress = (value) => {
   const address = value && typeof value === 'object' ? value : {};
@@ -376,6 +395,92 @@ const buildOrderNotificationMessage = (order, status) => {
   };
   return messages[status] || '';
 };
+const buildOwnerOrderNotificationMessage = (order) => {
+  const customer = String(order.customer_name || 'Customer').trim() || 'Customer';
+  const mobile = String(order.customer_phone || '').trim();
+  const address = formatOrderAddress(safeJson(order.delivery_address_json, {}));
+  const items = safeJson(order.items_json, []).map((item) => {
+    const name = String(item.productName || item.name || 'Item').trim() || 'Item';
+    const quantity = Number(item.quantity || 0);
+    const price = formatCurrency(item.unitPrice ?? item.price ?? 0);
+    return `- ${name}, Qty: ${quantity}, Price: ${price}`;
+  }).join('\n');
+  const gst = String(order.gst_number || '').trim();
+  return [
+    'Hello Murugesan Electrical and Hardwares,',
+    '',
+    'New order received.',
+    '',
+    `Order: ${String(order.order_number || '').trim()}`,
+    `Customer: ${customer}`,
+    `Mobile: ${mobile}`,
+    address ? `Delivery address: ${address}` : '',
+    items ? `Items:\n${items}` : '',
+    `Total: ${formatCurrency(order.total)}`,
+    'Status: PENDING',
+    gst ? `GST: ${gst}` : '',
+  ].filter(Boolean).join('\n');
+};
+const whatsappRecipient = (value) => normalizeWhatsappNumber(value).replace(/\D/g, '');
+const orderTemplateParameters = (order, status) => [
+  String(order.customer_name || 'Customer').trim() || 'Customer',
+  String(order.order_number || '').trim(),
+  formatCurrency(order.total),
+  status,
+];
+async function sendWhatsAppTemplateNotification({ order, type, recipient, templateName, status }) {
+  const destination = whatsappRecipient(recipient);
+  const existing = destination
+    ? db.prepare('SELECT * FROM order_notifications WHERE order_id = ? AND type = ? AND recipient = ? AND status = ? ORDER BY id DESC LIMIT 1').get(order.id, type, destination, 'SENT')
+    : null;
+  if (existing) return { sent: true, duplicate: true, providerMessageId: existing.provider_message_id, notificationId: Number(existing.id) };
+
+  const timestamp = now();
+  const message = type === 'NEW_ORDER_OWNER'
+    ? buildOwnerOrderNotificationMessage(order)
+    : (buildOrderNotificationMessage(order, status) || `${type} ${order.order_number || ''}`.trim());
+  const insert = db.prepare('INSERT INTO order_notifications (order_id,customer_id,type,channel,message,recipient,status,created_at) VALUES (?,?,?,?,?,?,?,?)');
+  if (!destination) {
+    const result = insert.run(order.id, order.customer_id, type, 'WHATSAPP', message, '', 'FAILED', timestamp);
+    db.prepare('UPDATE order_notifications SET error_message = ? WHERE id = ?').run('WhatsApp recipient is missing', result.lastInsertRowid);
+    return { sent: false, error: 'WhatsApp recipient is missing', notificationId: Number(result.lastInsertRowid) };
+  }
+  if (!whatsappConfig.accessToken || !whatsappConfig.phoneNumberId || !templateName) {
+    const result = insert.run(order.id, order.customer_id, type, 'WHATSAPP', message, destination, 'FAILED', timestamp);
+    db.prepare('UPDATE order_notifications SET error_message = ? WHERE id = ?').run('WhatsApp Cloud API is not configured', result.lastInsertRowid);
+    console.warn('[whatsapp] not configured', { orderId: order.id, type, recipient: destination });
+    return { sent: false, error: 'WhatsApp Cloud API is not configured', notificationId: Number(result.lastInsertRowid) };
+  }
+
+  const result = insert.run(order.id, order.customer_id, type, 'WHATSAPP', message, destination, 'PENDING', timestamp);
+  const notificationId = Number(result.lastInsertRowid);
+  try {
+    const response = await fetch(`https://graph.facebook.com/${whatsappConfig.apiVersion}/${whatsappConfig.phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${whatsappConfig.accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: destination,
+        type: 'template',
+        template: {
+          name: templateName,
+          language: { code: whatsappConfig.language },
+          components: [{ type: 'body', parameters: orderTemplateParameters(order, status).map((text) => ({ type: 'text', text })) }],
+        },
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload?.error?.message || `WhatsApp API returned ${response.status}`);
+    const providerMessageId = payload?.messages?.[0]?.id || null;
+    db.prepare('UPDATE order_notifications SET status = ?, provider_message_id = ?, error_message = NULL WHERE id = ?').run('SENT', providerMessageId, notificationId);
+    return { sent: true, providerMessageId, notificationId };
+  } catch (error) {
+    const errorMessage = String(error?.message || 'WhatsApp API request failed').slice(0, 1000);
+    db.prepare('UPDATE order_notifications SET status = ?, error_message = ? WHERE id = ?').run('FAILED', errorMessage, notificationId);
+    console.error('[whatsapp] send failed', { orderId: order.id, type, recipient: destination, error: errorMessage });
+    return { sent: false, error: errorMessage, notificationId };
+  }
+}
 
 const productSelect = `
   SELECT p.*, c.name AS category_name, c.slug AS category_slug, c.status AS category_status,
@@ -537,6 +642,10 @@ function applyDatabaseMigrations() {
   ensureColumn('users', 'mobile_number', 'mobile_number TEXT');
   ensureColumn('users', 'last_login_at', 'last_login_at TEXT');
   ensureColumn('addresses', 'gst_number', 'gst_number TEXT');
+  ensureColumn('order_notifications', 'recipient', 'recipient TEXT NOT NULL DEFAULT ""');
+  ensureColumn('order_notifications', 'status', 'status TEXT NOT NULL DEFAULT "PENDING"');
+  ensureColumn('order_notifications', 'provider_message_id', 'provider_message_id TEXT');
+  ensureColumn('order_notifications', 'error_message', 'error_message TEXT');
   ensureColumn('product_types', 'created_at', 'created_at TEXT NOT NULL DEFAULT "1970-01-01T00:00:00.000Z"');
   ensureColumn('product_types', 'updated_at', 'updated_at TEXT NOT NULL DEFAULT "1970-01-01T00:00:00.000Z"');
   ensureColumn('attributes', 'created_at', 'created_at TEXT NOT NULL DEFAULT "1970-01-01T00:00:00.000Z"');
@@ -781,7 +890,7 @@ app.delete('/api/me/addresses/:id', auth, (req, res) => { if (req.user.role !== 
 app.get('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const rows = db.prepare('SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC').all(req.user.id).map(mapOrder); res.json(rows); });
 app.get('/api/orders/:id', auth, (req, res) => { const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id)); if (!order) return res.status(404).json({ error: 'Order not found' }); const mapped = mapOrder(order); if (req.user.role === 'ADMIN' || Number(req.user.id) === Number(order.customer_id)) return res.json(mapped); return res.status(403).json({ error: 'You do not have access to this order' }); });
 app.get('/api/admin/orders', auth, admin, (_req, res) => { const rows = db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all().map(mapOrder); res.json(rows); });
-app.patch('/api/admin/orders/:id/status', auth, admin, (req, res) => {
+app.patch('/api/admin/orders/:id/status', auth, admin, async (req, res) => {
   const orderId = Number(req.params.id);
   const requestedStatus = normalizeOrderStatus(req.body?.status);
   if (!Number.isInteger(orderId) || orderId <= 0) return res.status(400).json({ error: 'Invalid order ID' });
@@ -805,7 +914,18 @@ app.patch('/api/admin/orders/:id/status', auth, admin, (req, res) => {
     db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(requestedStatus, timestamp, orderId);
     db.prepare('INSERT INTO order_status_history (order_id,status,changed_by,created_at,note) VALUES (?,?,?,?,?)').run(orderId, requestedStatus, req.user.id, timestamp, note);
     db.exec('COMMIT');
-    res.json(mapOrder(db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId)));
+    const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+    let notification = null;
+    if (requestedStatus === 'CONFIRMED') {
+      notification = await sendWhatsAppTemplateNotification({
+        order: updatedOrder,
+        type: 'ORDER_CONFIRMED_CUSTOMER',
+        recipient: updatedOrder.customer_phone,
+        templateName: whatsappConfig.confirmedTemplate,
+        status: requestedStatus,
+      });
+    }
+    res.json({ ...mapOrder(updatedOrder), notification: notification ? { sent: notification.sent, error: notification.error || null } : null });
   } catch (error) {
     try { db.exec('ROLLBACK'); } catch { /* transaction already closed */ }
     console.error('[api/admin/orders/:id/status]', error && error.stack ? error.stack : error);
@@ -819,25 +939,24 @@ app.get('/api/orders/:id/status-history', auth, (req, res) => {
   if (req.user.role !== 'ADMIN' && Number(req.user.id) !== Number(order.customer_id)) return res.status(403).json({ error: 'You do not have access to this order' });
   res.json(db.prepare('SELECT id, status, changed_by AS changedBy, created_at AS createdAt, note FROM order_status_history WHERE order_id = ? ORDER BY created_at, id').all(orderId).map((row) => ({ ...row, status: normalizeOrderStatus(row.status) || 'PENDING' })));
 });
-app.post('/api/orders/:id/notify', auth, admin, (req, res) => {
+app.post('/api/orders/:id/notify', auth, admin, async (req, res) => {
   const orderId = Number(req.params.id);
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
   if (!order) return res.status(404).json({ error: 'Order not found' });
   const status = normalizeOrderStatus(order.status);
-  const message = buildOrderNotificationMessage(order, status);
   const notificationType = notificationTypeForStatus[status];
-  if (!message || !notificationType) return res.status(400).json({ error: 'Customer notification is not available for this order status' });
+  if (!notificationType) return res.status(400).json({ error: 'WhatsApp notification is not available for this order status' });
   const user = db.prepare('SELECT mobile_number FROM users WHERE id = ? AND role = ?').get(order.customer_id, 'CUSTOMER');
-  const destination = normalizeWhatsappNumber(user?.mobile_number || order.customer_phone);
-  if (!destination) return res.status(400).json({ error: 'Customer phone number is unavailable' });
-  const result = db.prepare('INSERT INTO order_notifications (order_id,customer_id,type,channel,message,created_at) VALUES (?,?,?,?,?,?)').run(order.id, order.customer_id, notificationType, 'WHATSAPP', message, now());
-  res.json({
-    notificationId: Number(result.lastInsertRowid),
-    channel: 'WHATSAPP',
-    destination: destination.replace(/\D/g, ''),
-    message,
-    url: `https://wa.me/${destination.replace(/\D/g, '')}?text=${encodeURIComponent(message)}`,
+  const ownerNotification = notificationType === 'NEW_ORDER_OWNER';
+  const result = await sendWhatsAppTemplateNotification({
+    order,
+    type: notificationType,
+    recipient: ownerNotification ? whatsappConfig.ownerNumber : (user?.mobile_number || order.customer_phone),
+    templateName: ownerNotification ? whatsappConfig.newOrderTemplate : whatsappConfig.confirmedTemplate,
+    status,
   });
+  if (!result.sent) return res.status(502).json({ error: result.error || 'WhatsApp notification failed', notificationId: result.notificationId });
+  res.json({ notificationId: result.notificationId, channel: 'WHATSAPP', providerMessageId: result.providerMessageId, sent: true });
 });
 app.get('/api/admin/customers', auth, admin, (_req, res) => {
   const rows = db.prepare(`
@@ -862,7 +981,7 @@ app.get('/api/admin/customers', auth, admin, (_req, res) => {
   }));
   res.json(rows);
 });
-app.post('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; const address = db.prepare('SELECT * FROM addresses WHERE id = ? AND customer_id = ?').get(Number(body.addressId), req.user.id); const user = db.prepare('SELECT id,name,email,mobile_number FROM users WHERE id = ?').get(req.user.id); if (!address || !user || !Array.isArray(body.items) || !body.items.length) return res.status(400).json({ error: 'A delivery address and cart items are required' }); const gstNumber = normalizeGstNumber(body.gstNumber ?? body.gst_number ?? address.gst_number ?? ''); if (gstNumber && !isValidGstNumber(gstNumber)) return res.status(400).json({ error: 'Please enter a valid GST number.' }); const normalizedItems = body.items.map((item) => ({ productId: Number(item.productId), name: String(item.name || '').trim(), quantity: Number(item.quantity), price: Number(item.price || 0) })); if (!normalizedItems.length || normalizedItems.some((item) => !item.productId || !item.name || !Number.isInteger(item.quantity) || item.quantity <= 0 || !Number.isFinite(item.price) || item.price < 0)) {
+app.post('/api/me/orders', auth, async (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; const address = db.prepare('SELECT * FROM addresses WHERE id = ? AND customer_id = ?').get(Number(body.addressId), req.user.id); const user = db.prepare('SELECT id,name,email,mobile_number FROM users WHERE id = ?').get(req.user.id); if (!address || !user || !Array.isArray(body.items) || !body.items.length) return res.status(400).json({ error: 'A delivery address and cart items are required' }); const gstNumber = normalizeGstNumber(body.gstNumber ?? body.gst_number ?? address.gst_number ?? ''); if (gstNumber && !isValidGstNumber(gstNumber)) return res.status(400).json({ error: 'Please enter a valid GST number.' }); const normalizedItems = body.items.map((item) => ({ productId: Number(item.productId), name: String(item.name || '').trim(), quantity: Number(item.quantity), price: Number(item.price || 0) })); if (!normalizedItems.length || normalizedItems.some((item) => !item.productId || !item.name || !Number.isInteger(item.quantity) || item.quantity <= 0 || !Number.isFinite(item.price) || item.price < 0)) {
     return res.status(400).json({ error: 'Order items are invalid' });
   }
   const timestamp = now();
@@ -925,7 +1044,14 @@ app.post('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER
 
     db.exec('COMMIT');
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
-    res.status(201).json(mapOrder(order));
+    const notification = await sendWhatsAppTemplateNotification({
+      order,
+      type: 'NEW_ORDER_OWNER',
+      recipient: whatsappConfig.ownerNumber,
+      templateName: whatsappConfig.newOrderTemplate,
+      status: 'PENDING',
+    });
+    res.status(201).json({ ...mapOrder(order), notification: { sent: notification.sent, error: notification.error || null } });
   } catch (error) {
     db.exec('ROLLBACK');
     if (String(error.message).includes('UNIQUE')) {

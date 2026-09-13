@@ -639,6 +639,7 @@ type CustomerOrder = {
   }[];
   createdAt: string;
   itemCount?: number;
+  notification?: { sent: boolean; error?: string | null } | null;
 };
 const orderStatusTimeline = [
   "PENDING",
@@ -2604,7 +2605,11 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
     setOrders((current) =>
       current.map((order) => (order.id === updated.id ? updated : order)),
     );
-    notify("Order status updated");
+    notify(
+      updated.notification?.error
+        ? `Order status updated, but WhatsApp failed: ${updated.notification.error}`
+        : "Order status updated",
+    );
   };
   const notifyCustomer = async (order: CustomerOrder) => {
     const response = await fetch(`/api/orders/${order.id}/notify`, {
