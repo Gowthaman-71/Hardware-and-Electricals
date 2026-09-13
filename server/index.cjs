@@ -397,19 +397,21 @@ const buildOrderNotificationMessage = (order, status) => {
 };
 const buildOwnerOrderNotificationMessage = (order) => {
   const customer = String(order.customer_name || 'Customer').trim() || 'Customer';
-  const mobile = String(order.customer_phone || '').trim();
+  const rawMobile = String(order.customer_phone || '').trim();
+  const mobile = normalizeWhatsappNumber(rawMobile) || rawMobile;
   const address = formatOrderAddress(safeJson(order.delivery_address_json, {}));
   const items = safeJson(order.items_json, []).map((item) => {
     const name = String(item.productName || item.name || 'Item').trim() || 'Item';
     const quantity = Number(item.quantity || 0);
+    const unit = String(item.unit || '').trim();
     const price = formatCurrency(item.unitPrice ?? item.price ?? 0);
-    return `- ${name}, Qty: ${quantity}, Price: ${price}`;
+    return `- ${name}, Qty: ${quantity}${unit ? `, Unit: ${unit}` : ''}, Price: ${price}`;
   }).join('\n');
   const gst = String(order.gst_number || '').trim();
   return [
     'Hello Murugesan Electrical and Hardwares,',
     '',
-    'New order received.',
+    'I have placed an order.',
     '',
     `Order: ${String(order.order_number || '').trim()}`,
     `Customer: ${customer}`,
@@ -417,8 +419,7 @@ const buildOwnerOrderNotificationMessage = (order) => {
     address ? `Delivery address: ${address}` : '',
     items ? `Items:\n${items}` : '',
     `Total: ${formatCurrency(order.total)}`,
-    'Status: PENDING',
-    gst ? `GST: ${gst}` : '',
+    gst ? `GST Number: ${gst}` : '',
   ].filter(Boolean).join('\n');
 };
 const whatsappRecipient = (value) => normalizeWhatsappNumber(value).replace(/\D/g, '');
@@ -1014,6 +1015,7 @@ app.post('/api/me/orders', auth, async (req, res) => { if (req.user.role !== 'CU
         productName: product.name,
         productImage: product.image_url || '',
         quantity,
+        unit: String(product.unit || '').trim(),
         unitPrice: finalPrice,
         totalPrice: finalPrice * quantity,
         name: product.name,
