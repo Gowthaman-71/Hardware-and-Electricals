@@ -41,9 +41,10 @@ if (isProduction) {
 
 let uploadDirectory;
 if (isProduction) {
-  const configuredUploadDir = process.env.UPLOAD_DIR;
-  const fallbackUploadDir = process.env.RENDER === 'true' ? renderWritableUploadDirectory : productionUploadDirectory;
-  uploadDirectory = configuredUploadDir && configuredUploadDir.trim() ? configuredUploadDir : fallbackUploadDir;
+  const configuredUploadDir = process.env.UPLOAD_DIR && process.env.UPLOAD_DIR.trim();
+  const isRenderRuntime = process.env.RENDER === 'true';
+  const safeRenderUploadDir = configuredUploadDir && !configuredUploadDir.includes('/var/data') ? configuredUploadDir : renderWritableUploadDirectory;
+  uploadDirectory = isRenderRuntime ? safeRenderUploadDir : (configuredUploadDir || productionUploadDirectory);
 } else {
   const rawUploadDirectory = process.env.UPLOAD_DIR || 'server/uploads';
   uploadDirectory = rawUploadDirectory.startsWith('/') ? rawUploadDirectory : path.resolve(root, rawUploadDirectory);
