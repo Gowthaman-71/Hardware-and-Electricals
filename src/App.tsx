@@ -2727,6 +2727,7 @@ function AdminProducts({
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("All");
   const [status, setStatus] = useState("All");
+  const [inlineStockDrafts, setInlineStockDrafts] = useState<Record<number, string>>({});
   const visible = products.filter(
     (p) =>
       `${p.name} ${p.code} ${p.brand} ${p.category}`
@@ -2735,6 +2736,31 @@ function AdminProducts({
       (category === "All" || p.category === category) &&
       (status === "All" || statusOf(p.stock) === status),
   );
+  const commitInlineStock = async (product: Product, rawValue: string) => {
+    const trimmed = String(rawValue ?? "").trim();
+    if (!trimmed) {
+      setInlineStockDrafts((current) => ({ ...current, [product.id]: String(product.stock) }));
+      return;
+    }
+    const stock = Number(trimmed);
+    if (!Number.isInteger(stock) || stock < 0 || !Number.isFinite(stock)) {
+      setInlineStockDrafts((current) => ({ ...current, [product.id]: String(product.stock) }));
+      notify("Stock must be a whole number greater than or equal to 0.");
+      return;
+    }
+    if (stock === product.stock) {
+      setInlineStockDrafts((current) => ({ ...current, [product.id]: String(stock) }));
+      return;
+    }
+    try {
+      const saved = await saveProductRequest(apiToken, { ...product, stock }, categories);
+      setProducts(products.map((item) => (item.id === saved.id ? saved : item)));
+      setInlineStockDrafts((current) => ({ ...current, [product.id]: String(saved.stock) }));
+    } catch (reason) {
+      setInlineStockDrafts((current) => ({ ...current, [product.id]: String(product.stock) }));
+      notify(reason instanceof Error ? reason.message : "Unable to update stock. Please try again.");
+    }
+  };
   const save = async (product: Product) => {
     try {
       const saved = await saveProductRequest(apiToken, product, categories);
@@ -2846,16 +2872,34 @@ function AdminProducts({
                 className="stock-input"
                 type="number"
                 min="0"
-                value={p.stock}
-                onChange={(e) => setProducts(products.map((item) => item.id === p.id ? { ...item, stock: Number(e.target.value) } : item))}
-                onBlur={(e) => {
-                  const stock = Number(e.target.value);
-                  void saveProductRequest(apiToken, { ...p, stock }, categories)
-                    .then((saved) => setProducts(products.map((item) => item.id === saved.id ? saved : item)))
-                    .catch(() => {
-                      setProducts(products);
-                      notify("Unable to update stock. Please try again.");
-                    });
+                value={inlineStockDrafts[p.id] ?? String(p.stock)}
+                onFocus={() => {
+                  setInlineStockDrafts((current) => ({
+                    ...current,
+                    [p.id]: current[p.id] ?? String(p.stock),
+                  }));
+                }}
+                onChange={(e) => {
+                  const nextValue = e.target.value;
+                  setInlineStockDrafts((current) => ({
+                    ...current,
+                    [p.id]: nextValue,
+                  }));
+                }}
+                onBlur={() => {
+                  void commitInlineStock(p, inlineStockDrafts[p.id] ?? String(p.stock));
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void commitInlineStock(p, inlineStockDrafts[p.id] ?? String(p.stock));
+                  }
+                  if (e.key === "Escape") {
+                    setInlineStockDrafts((current) => ({
+                      ...current,
+                      [p.id]: String(p.stock),
+                    }));
+                  }
                 }}
               />{" "}
               {p.unit}
