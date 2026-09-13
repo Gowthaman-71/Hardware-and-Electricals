@@ -3135,20 +3135,38 @@ function CustomerCheckout({
       return;
     }
     const order = (await response.json()) as CustomerOrder;
+
+    const customerName = String(customer?.name || address.fullName || "Customer").trim();
+    const rawMobile = String(customer?.mobile || address.phone || "").replace(/\D/g, "");
+    const mobile = rawMobile.length === 10 ? `+91${rawMobile}` : rawMobile.length > 0 ? `+${rawMobile.replace(/^\+/, "")}` : "Not provided";
+    const addressParts = [
+      address.addressLine1,
+      address.area,
+      address.city,
+      address.state,
+    ].filter((part) => typeof part === "string" && part.trim().length > 0);
+    const addressText = addressParts.join(", ");
+    const pincodeText = String(address.pincode || "").trim();
+    const deliveryAddress = pincodeText ? `${addressText}${addressText ? " - " : ""}${pincodeText}` : addressText || "Not provided";
+    const gstValue = normalizedGst || "";
+    const gstLine = gstValue ? `GST Number: ${gstValue}` : "";
+
     const orderMessage = [
-      `Hello Murugesan Electrical and Hardwares, I have placed an order.`,
+      "Hello Murugesan Electrical and Hardwares, I have placed an order.",
       `Order: ${order.orderNumber}`,
-      `Customer: ${customer?.name || address.fullName}`,
-      `Mobile: ${customer?.mobile || address.phone}`,
-      `Delivery address: ${address.addressLine1}, ${address.area}, ${address.city}, ${address.state} - ${address.pincode}`,
+      `Customer: ${customerName}`,
+      `Mobile: ${mobile}`,
+      `Delivery address: ${deliveryAddress}`,
+      ...(gstLine ? [gstLine] : []),
       "",
       "Items:",
-      ...items.map(
-        ({ product, quantity }) =>
-          `- ${product.name} (${product.code}), Qty: ${quantity}, Price: ${money(product.price)}`,
-      ),
+      ...items.map(({ product, quantity }) => {
+        const unitSuffix = product.unit && String(product.unit).trim() ? `, Unit: ${product.unit}` : "";
+        return `- ${product.name}, Qty: ${quantity}${unitSuffix}, Price: ${money(product.price)}`;
+      }),
       `Total: ${money(order.total)}`,
     ].join("\n");
+
     window.open(
       `https://wa.me/${businessWhatsappNumber}?text=${encodeURIComponent(orderMessage)}`,
       "_blank",

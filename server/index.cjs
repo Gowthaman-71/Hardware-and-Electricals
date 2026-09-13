@@ -6,6 +6,7 @@ const multer = require('multer');
 const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
+const { createPgCompatDatabase } = require('./postgresCompat.cjs');
 
 const root = path.resolve(__dirname, '..');
 const runtimeEnvPath = path.join(root, '.env');
@@ -22,19 +23,16 @@ if (!jwtSecret) {
   throw new Error('JWT_SECRET is required in production.');
 }
 const seedDemoDataEnabled = String(process.env.SEED_DEMO_DATA || '').trim().toLowerCase() === 'true';
-const productionDatabasePath = '/var/data/catalog.sqlite';
-const productionUploadDirectory = '/var/data/uploads';
-const normalizeProductionPath = (value, expectedValue, label) => {
-  const candidate = String(value ?? '').trim();
-  if (!candidate) return expectedValue;
-  if (candidate === expectedValue) return expectedValue;
-  throw new Error(`Production ${label} must be exactly ${expectedValue}. Received: ${candidate}`);
-};
+const productionDatabaseUrl = process.env.DATABASE_URL || null;
+const productionUploadDirectory = path.resolve(root, 'server/uploads');
+
+if (isProduction && !productionDatabaseUrl) {
+  throw new Error('Production requires DATABASE_URL to be configured. SQLite is not allowed in production.');
+}
 
 let databasePath;
 if (isProduction) {
-  const configuredDatabasePath = process.env.DATABASE_PATH;
-  databasePath = normalizeProductionPath(configuredDatabasePath, productionDatabasePath, 'DATABASE_PATH');
+  databasePath = 'postgresql://production-database';
 } else {
   const rawDatabasePath = process.env.DATABASE_PATH || 'server/data/catalog.sqlite';
   databasePath = rawDatabasePath.startsWith('/') ? rawDatabasePath : path.resolve(root, rawDatabasePath);
@@ -43,20 +41,22 @@ if (isProduction) {
 let uploadDirectory;
 if (isProduction) {
   const configuredUploadDir = process.env.UPLOAD_DIR;
-  uploadDirectory = normalizeProductionPath(configuredUploadDir, productionUploadDirectory, 'UPLOAD_DIR');
+  uploadDirectory = configuredUploadDir && configuredUploadDir.trim() ? path.resolve(root, configuredUploadDir) : productionUploadDirectory;
 } else {
   const rawUploadDirectory = process.env.UPLOAD_DIR || 'server/uploads';
   uploadDirectory = rawUploadDirectory.startsWith('/') ? rawUploadDirectory : path.resolve(root, rawUploadDirectory);
 }
 
-const resolvedDatabasePath = isProduction ? databasePath : path.resolve(databasePath);
-const resolvedUploadDirectory = isProduction ? uploadDirectory : path.resolve(uploadDirectory);
+const resolvedDatabasePath = isProduction ? null : path.resolve(databasePath);
+const resolvedUploadDirectory = path.resolve(uploadDirectory);
 
-try {
-  const databaseDir = path.dirname(resolvedDatabasePath);
-  fs.mkdirSync(databaseDir, { recursive: true });
-} catch (err) {
-  throw new Error(`Unable to create database directory: ${path.dirname(resolvedDatabasePath)} (${err.message})`);
+if (!isProduction) {
+  try {
+    const databaseDir = path.dirname(resolvedDatabasePath);
+    fs.mkdirSync(databaseDir, { recursive: true });
+  } catch (err) {
+    throw new Error(`Unable to create database directory: ${path.dirname(resolvedDatabasePath)} (${err.message})`);
+  }
 }
 
 try {
@@ -68,18 +68,212 @@ try {
 if (isProduction) {
   console.log('[database] Production contract', {
     environment: process.env.NODE_ENV,
-    configuredDatabasePath: process.env.DATABASE_PATH || '(unset)',
-    databasePath,
-    resolvedDatabasePath,
+    configuredDatabaseUrl: process.env.DATABASE_URL ? '[set]' : '(unset)',
+    databaseUrlConfigured: Boolean(process.env.DATABASE_URL),
     uploadDirectory,
     resolvedUploadDirectory,
     contract: 'PASS',
   });
 }
 
-const db = new DatabaseSync(resolvedDatabasePath);
+const db = isProduction
+  ? createPgCompatDatabase({
+      connectionString: productionDatabaseUrl,
+      ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : false,
+      max: 5,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    })
+  : new DatabaseSync(resolvedDatabasePath);
 
 const now = () => new Date().toISOString();
+const runProductionSchemaSetup = () => {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE,
+      mobile_number TEXT UNIQUE,
+      gst_number TEXT,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'CUSTOMER',
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_login_at TIMESTAMPTZ
+    )`,
+    `CREATE TABLE IF NOT EXISTS addresses (
+      id SERIAL PRIMARY KEY,
+      customer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      type TEXT NOT NULL DEFAULT 'Home',
+      full_name TEXT NOT NULL,
+      phone TEXT NOT NULL,
+      gst_number TEXT,
+      address_line1 TEXT NOT NULL,
+      address_line2 TEXT NOT NULL DEFAULT '',
+      area TEXT NOT NULL DEFAULT '',
+      city TEXT NOT NULL,
+      state TEXT NOT NULL,
+      pincode TEXT NOT NULL,
+      is_default BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS categories (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      parent_id INTEGER REFERENCES categories(id),
+      image_url TEXT,
+      description TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS brands (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      logo_url TEXT,
+      description TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS product_types (
+      id SERIAL PRIMARY KEY,
+      category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (category_id, name)
+    )`,
+    `CREATE TABLE IF NOT EXISTS attributes (
+      id SERIAL PRIMARY KEY,
+      category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      required BOOLEAN NOT NULL DEFAULT FALSE,
+      filterable BOOLEAN NOT NULL DEFAULT FALSE,
+      searchable BOOLEAN NOT NULL DEFAULT FALSE,
+      options_json TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (category_id, name)
+    )`,
+    `CREATE TABLE IF NOT EXISTS products (
+      id SERIAL PRIMARY KEY,
+      sku TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+      brand_id INTEGER REFERENCES brands(id),
+      product_type_id INTEGER REFERENCES product_types(id),
+      description TEXT NOT NULL DEFAULT '',
+      details TEXT NOT NULL DEFAULT '',
+      price NUMERIC(12,2) NOT NULL DEFAULT 0,
+      mrp NUMERIC(12,2) NOT NULL DEFAULT 0,
+      discount NUMERIC(12,2) NOT NULL DEFAULT 0,
+      stock INTEGER NOT NULL DEFAULT 0,
+      unit TEXT NOT NULL DEFAULT 'Nos',
+      image_url TEXT,
+      image_urls_json TEXT NOT NULL DEFAULT '[]',
+      attributes_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS orders (
+      id SERIAL PRIMARY KEY,
+      order_number TEXT NOT NULL UNIQUE,
+      customer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+      customer_name TEXT NOT NULL,
+      customer_email TEXT NOT NULL DEFAULT '',
+      customer_phone TEXT NOT NULL,
+      gst_number TEXT,
+      items_json TEXT NOT NULL DEFAULT '[]',
+      subtotal NUMERIC(12,2) NOT NULL DEFAULT 0,
+      delivery_charge NUMERIC(12,2) NOT NULL DEFAULT 0,
+      total NUMERIC(12,2) NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      payment_method TEXT NOT NULL DEFAULT 'Cash on Delivery',
+      payment_status TEXT NOT NULL DEFAULT 'PENDING',
+      delivery_address_json TEXT NOT NULL,
+      notification_status TEXT NOT NULL DEFAULT 'PENDING',
+      notification_sent_at TIMESTAMPTZ,
+      notification_message_id TEXT,
+      idempotency_key TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS order_items (
+      id SERIAL PRIMARY KEY,
+      order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      product_id INTEGER,
+      product_name TEXT NOT NULL,
+      product_image TEXT,
+      quantity INTEGER NOT NULL DEFAULT 1,
+      unit_price NUMERIC(12,2) NOT NULL DEFAULT 0,
+      total_price NUMERIC(12,2) NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS settings (
+      id SERIAL PRIMARY KEY,
+      key TEXT NOT NULL UNIQUE,
+      value TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE TABLE IF NOT EXISTS import_jobs (
+      id SERIAL PRIMARY KEY,
+      status TEXT NOT NULL,
+      total_rows INTEGER NOT NULL DEFAULT 0,
+      processed_rows INTEGER NOT NULL DEFAULT 0,
+      valid_rows INTEGER NOT NULL DEFAULT 0,
+      error_rows INTEGER NOT NULL DEFAULT 0,
+      errors_json TEXT NOT NULL DEFAULT '[]',
+      created_by INTEGER REFERENCES users(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_addresses_customer ON addresses(customer_id, is_default DESC, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_orders_customer_created ON orders(customer_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders(status, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id, product_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_categories_status_order ON categories(status, sort_order)`,
+    `CREATE INDEX IF NOT EXISTS idx_brands_status ON brands(status)`,
+    `CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_products_type ON products(product_type_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_products_status_created ON products(status, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_products_name ON products(name)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_mobile_number ON users(mobile_number) WHERE mobile_number IS NOT NULL`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_order_number ON orders(order_number) WHERE order_number IS NOT NULL`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idempotency_key ON orders(idempotency_key) WHERE idempotency_key IS NOT NULL`
+  ];
+
+  for (const statement of statements) {
+    db.exec(statement);
+  }
+};
+const syncPostgresSequences = () => {
+  if (!isProduction) return;
+  const tables = ['users', 'addresses', 'categories', 'brands', 'product_types', 'attributes', 'products', 'orders', 'order_items', 'settings', 'import_jobs'];
+  for (const tableName of tables) {
+    try {
+      db.exec(`SELECT setval(pg_get_serial_sequence('${tableName}', 'id'), COALESCE((SELECT MAX(id) FROM ${tableName}) + 1, 1), false) WHERE EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = '${tableName}' AND column_name = 'id');`);
+    } catch (error) {
+      console.warn('[database] Failed to sync sequence for table', tableName, error && error.message ? error.message : error);
+    }
+  }
+};
 const normalizePhoneNumber = (value) => {
   const digits = String(value || '').replace(/\D/g, '');
   if (!digits) return '';
@@ -260,6 +454,11 @@ function backupDatabaseIfNeeded() {
   console.log('[database] Backup created', { backupPath });
 }
 function applyDatabaseMigrations() {
+  if (isProduction) {
+    runProductionSchemaSetup();
+    return;
+  }
+
   const schemaSql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   db.exec(schemaSql);
   db.exec(`CREATE TABLE IF NOT EXISTS settings (
@@ -297,21 +496,23 @@ function ensureCoreAdminAccount() {
   const adminEmail = String(process.env.ADMIN_EMAIL || 'owner@murugesan.in').trim().toLowerCase();
   const adminMobile = normalizeMobile(process.env.ADMIN_MOBILE || '9361866771');
   const configuredPassword = process.env.ADMIN_PASSWORD || 'change-this-before-production';
-  const passwordHash = bcrypt.hashSync(configuredPassword, 12);
   const adminRows = db.prepare("SELECT id, email, mobile_number, status FROM users WHERE role = 'ADMIN' ORDER BY id").all();
 
   if (!adminRows.length) {
+    const passwordHash = bcrypt.hashSync(configuredPassword, 12);
     db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').run('Store Owner', adminEmail, adminMobile, passwordHash, 'ADMIN', 'ACTIVE', now(), now());
     return;
   }
 
   const primaryAdmin = adminRows[0];
-  for (const row of adminRows.slice(1)) {
-    const staleEmail = row.email && row.email !== adminEmail ? row.email : `archived-admin-${row.id}@local.invalid`;
-    db.prepare("UPDATE users SET email = ?, mobile_number = NULL, password_hash = ?, status = 'INACTIVE', updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(staleEmail, passwordHash, now(), row.id);
+  if (primaryAdmin.email !== adminEmail || String(primaryAdmin.mobile_number || '') !== String(adminMobile)) {
+    db.prepare("UPDATE users SET email = ?, mobile_number = ?, updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(adminEmail, adminMobile, now(), primaryAdmin.id);
   }
 
-  db.prepare("UPDATE users SET email = ?, mobile_number = ?, password_hash = ?, status = 'ACTIVE', updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(adminEmail, adminMobile, passwordHash, now(), primaryAdmin.id);
+  for (const row of adminRows.slice(1)) {
+    const staleEmail = row.email && row.email !== adminEmail ? row.email : `archived-admin-${row.id}@local.invalid`;
+    db.prepare("UPDATE users SET email = ?, mobile_number = NULL, status = 'INACTIVE', updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(staleEmail, now(), row.id);
+  }
 
   const duplicateEmail = db.prepare("SELECT id FROM users WHERE email = ? AND role = 'ADMIN' AND id != ?").get(adminEmail, primaryAdmin.id);
   if (duplicateEmail) {
@@ -319,7 +520,7 @@ function ensureCoreAdminAccount() {
   }
 }
 function seedDemoData() {
-  if (!seedDemoDataEnabled) return;
+  if (isProduction || !seedDemoDataEnabled) return;
   const categoriesCount = db.prepare('SELECT COUNT(*) count FROM categories').get().count;
   if (categoriesCount > 0) return;
   const categoryNames = ['Electrical Switches', 'Sockets', 'Wires & Cables', 'Lighting', 'Fan Regulators', 'Electrical Accessories', 'Tools', 'Hardware', 'Plumbing Accessories', 'Other Products'];
@@ -346,14 +547,24 @@ function seedDemoData() {
 }
 backupDatabaseIfNeeded();
 applyDatabaseMigrations();
+if (isProduction) {
+  syncPostgresSequences();
+}
 ensureCoreAdminAccount();
 seedDemoData();
-console.log('[database] Connected', { path: databasePath, resolvedPath: resolvedDatabasePath, environment: process.env.NODE_ENV || 'development', seedDemoData: seedDemoDataEnabled });
+console.log('[database] Connected', { path: isProduction ? 'postgresql://configured-via-DATABASE_URL' : databasePath, resolvedPath: resolvedDatabasePath, environment: process.env.NODE_ENV || 'development', seedDemoData: seedDemoDataEnabled, mode: isProduction ? 'postgresql' : 'sqlite' });
 
 const app = express();
-console.log('[database] Configured', { path: databasePath, resolvedPath: resolvedDatabasePath, uploadDirectory, resolvedUploadDirectory, jwtSecretConfigured: Boolean(jwtSecret), seedDemoData: seedDemoDataEnabled });
+console.log('[database] Configured', { path: isProduction ? 'postgresql://configured-via-DATABASE_URL' : databasePath, resolvedPath: resolvedDatabasePath, uploadDirectory, resolvedUploadDirectory, jwtSecretConfigured: Boolean(jwtSecret), seedDemoData: seedDemoDataEnabled, mode: isProduction ? 'postgresql' : 'sqlite' });
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+app.use((req, _res, next) => {
+  if (req.body == null || typeof req.body !== 'object') {
+    req.body = {};
+  }
+  next();
+});
 app.use('/uploads', express.static(uploadDirectory));
 const upload = multer({ dest: uploadDirectory, limits: { fileSize: 10 * 1024 * 1024 } });
 const mobilePattern = /^[6-9]\d{9}$/;
@@ -365,14 +576,67 @@ const isValidGstNumber = (value) => {
 };
 const auth = (req, res, next) => { const token = (req.headers.authorization || '').replace(/^Bearer /, ''); try { req.user = jwt.verify(token, jwtSecret); next(); } catch { res.status(401).json({ error: 'Authentication required' }); } };
 const admin = (req, res, next) => req.user?.role === 'ADMIN' ? next() : res.status(403).json({ error: 'Admin permission required' });
-app.get('/api/health', (_req, res) => res.json({ ok: true, database: 'sqlite' }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, database: isProduction ? 'postgresql' : 'sqlite', environment: process.env.NODE_ENV || 'development', productionDatabaseConfigured: Boolean(productionDatabaseUrl) }));
 app.post('/api/auth/login', (req, res) => { const rawIdentifier = String(req.body.mobile ?? req.body.email ?? req.body.username ?? '').trim(); const password = String(req.body.password || ''); const normalizedMobile = normalizeMobile(rawIdentifier); const email = rawIdentifier.includes('@') ? rawIdentifier.toLowerCase() : ''; if ((!mobilePattern.test(normalizedMobile) && !email) || !password) return res.status(400).json({ error: 'Invalid mobile number or password.' }); const user = db.prepare("SELECT * FROM users WHERE status = 'ACTIVE' AND ((mobile_number = ? AND mobile_number IS NOT NULL) OR email = ?) LIMIT 1").get(normalizedMobile || null, email || null); if (!user || !bcrypt.compareSync(password, user.password_hash)) return res.status(401).json({ error: 'Invalid mobile number or password.' }); db.prepare("UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?").run(now(), now(), user.id); const token = jwt.sign({ id: user.id, role: user.role, email: user.email, mobile: user.mobile_number }, jwtSecret, { expiresIn: '8h' }); res.json({ token, user: { id: user.id, name: user.name, email: user.email, mobile: user.mobile_number, role: user.role } }); });
-app.post('/api/auth/register', (req, res) => { const name = String(req.body.name || '').trim(); const mobile = normalizeMobile(req.body.mobile); const password = String(req.body.password || ''); if (!name || !mobilePattern.test(mobile) || password.length < 8) return res.status(400).json({ error: 'Name, valid mobile number and an 8-character password are required' }); try { const existingCustomer = db.prepare("SELECT id FROM users WHERE role = 'CUSTOMER' AND mobile_number = ?").get(mobile); if (existingCustomer) return res.status(409).json({ error: 'This mobile number is already registered' }); const email = `${mobile}@mobile.local`; const timestamp = now(); const result = db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at,last_login_at) VALUES (?,?,?,?,?,?,?,?,?)').run(name, email, mobile, bcrypt.hashSync(password, 12), 'CUSTOMER', 'ACTIVE', timestamp, timestamp, timestamp); const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid); const token = jwt.sign({ id: user.id, role: user.role, email: user.email, mobile: user.mobile_number }, jwtSecret, { expiresIn: '8h' }); res.status(201).json({ token, user: { id: user.id, name: user.name, email: user.email, mobile: user.mobile_number, role: user.role } }); } catch (error) { res.status(error.message.includes('UNIQUE') ? 409 : 400).json({ error: error.message.includes('UNIQUE') ? 'That mobile number is already linked to an account' : 'Unable to create customer account' }); } });
+app.post('/api/auth/register', (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  console.log('[api/auth/register]', {
+    method: req.method,
+    path: req.path,
+    contentType: req.headers['content-type'],
+    body: {
+      name: body.name ? String(body.name).trim() : undefined,
+      mobile: body.mobile ? String(body.mobile).trim() : undefined,
+      passwordProvided: Boolean(body.password),
+    },
+  });
+  const name = String(body.name || '').trim();
+  const mobile = normalizeMobile(body.mobile);
+  const password = String(body.password || '');
+  if (!name || !mobilePattern.test(mobile) || password.length < 8) {
+    return res.status(400).json({ error: 'Name, valid mobile number and an 8-character password are required' });
+  }
+
+  try {
+    const existingCustomer = db.prepare("SELECT id FROM users WHERE role = 'CUSTOMER' AND mobile_number = ?").get(mobile);
+    if (existingCustomer) {
+      return res.status(409).json({ error: 'This mobile number is already registered' });
+    }
+
+    const email = `${mobile}@mobile.local`;
+    const timestamp = now();
+    let result;
+    try {
+      result = db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at,last_login_at) VALUES (?,?,?,?,?,?,?,?,?)').run(name, email, mobile, bcrypt.hashSync(password, 12), 'CUSTOMER', 'ACTIVE', timestamp, timestamp, timestamp);
+    } catch (insertError) {
+      if (String(insertError && insertError.message || '').toUpperCase().includes('UNIQUE') || String(insertError && insertError.message || '').toUpperCase().includes('duplicate')) {
+        return res.status(409).json({ error: 'That mobile number is already linked to an account' });
+      }
+      if (isProduction && String(insertError && insertError.message || '').toUpperCase().includes('PRIMARY KEY')) {
+        syncPostgresSequences();
+        const retryResult = db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at,last_login_at) VALUES (?,?,?,?,?,?,?,?,?)').run(name, email, mobile, bcrypt.hashSync(password, 12), 'CUSTOMER', 'ACTIVE', timestamp, timestamp, timestamp);
+        const user = db.prepare('SELECT * FROM users WHERE id = ?').get(retryResult.lastInsertRowid);
+        const token = jwt.sign({ id: user.id, role: user.role, email: user.email, mobile: user.mobile_number }, jwtSecret, { expiresIn: '8h' });
+        return res.status(201).json({ token, user: { id: user.id, name: user.name, email: user.email, mobile: user.mobile_number, role: user.role } });
+      }
+      throw insertError;
+    }
+
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(result.lastInsertRowid);
+    const token = jwt.sign({ id: user.id, role: user.role, email: user.email, mobile: user.mobile_number }, jwtSecret, { expiresIn: '8h' });
+    res.status(201).json({ token, user: { id: user.id, name: user.name, email: user.email, mobile: user.mobile_number, role: user.role } });
+  } catch (error) {
+    console.error('[api/auth/register] insert failed', { message: error && error.message, stack: error && error.stack, mobile, email: `${mobile}@mobile.local` });
+    const message = String(error && error.message || '');
+    const isUnique = /UNIQUE|duplicate/i.test(message);
+    res.status(isUnique ? 409 : 400).json({ error: isUnique ? 'That mobile number is already linked to an account' : 'Unable to create customer account' });
+  }
+});
 app.get('/api/me', auth, (req, res) => { const user = db.prepare('SELECT id,name,email,mobile_number AS mobile FROM users WHERE id = ? AND role = ? AND status = ?').get(req.user.id, 'CUSTOMER', 'ACTIVE'); if (!user) return res.status(404).json({ error: 'Customer account not found' }); res.json({ id: user.id, name: user.name, email: user.email, mobile: user.mobile }); });
 app.patch('/api/me', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const name = String(req.body.name || '').trim(); if (!name) return res.status(400).json({ error: 'Full name is required' }); db.prepare('UPDATE users SET name = ?, updated_at = ? WHERE id = ? AND role = ?').run(name, now(), req.user.id, 'CUSTOMER'); res.json(db.prepare('SELECT id,name,email,mobile_number AS mobile FROM users WHERE id = ?').get(req.user.id)); });
 app.get('/api/me/addresses', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); res.json(db.prepare('SELECT * FROM addresses WHERE customer_id = ? ORDER BY is_default DESC, created_at DESC').all(req.user.id).map(mapAddress)); });
-app.post('/api/me/addresses', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; const fullName = String(body.fullName ?? body.full_name ?? '').trim(); const phone = String(body.phone ?? '').trim(); const addressLine1 = String(body.addressLine1 ?? body.address_line1 ?? '').trim(); const city = String(body.city ?? '').trim(); const state = String(body.state ?? '').trim(); const pincode = String(body.pincode ?? '').trim(); const gstNumber = normalizeGstNumber(body.gstNumber ?? body.gst_number ?? ''); const required = [fullName, phone, addressLine1, city, state, pincode]; if (required.some((field) => !field) || !/^\d{10}$/.test(phone.replace(/\D/g, '')) || !/^\d{6}$/.test(pincode.trim())) return res.status(400).json({ error: 'Please provide valid required address details' }); if (gstNumber && !isValidGstNumber(gstNumber)) return res.status(400).json({ error: 'Please enter a valid GST number.' }); const timestamp = now(); const makeDefault = Boolean(body.isDefault ?? body.is_default) || !db.prepare('SELECT 1 FROM addresses WHERE customer_id = ? LIMIT 1').get(req.user.id); const insert = db.prepare('INSERT INTO addresses (customer_id,type,full_name,phone,gst_number,address_line1,address_line2,area,city,state,pincode,is_default,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)'); db.exec('BEGIN'); try { if (makeDefault) db.prepare('UPDATE addresses SET is_default = 0 WHERE customer_id = ?').run(req.user.id); const result = insert.run(req.user.id, ['Home', 'Office', 'Other'].includes(body.type ?? body.address_type) ? (body.type ?? body.address_type) : 'Home', fullName, phone, gstNumber || null, addressLine1, String(body.addressLine2 ?? body.address_line2 ?? '').trim(), String(body.area ?? '').trim(), city, state, pincode, makeDefault ? 1 : 0, timestamp, timestamp); db.exec('COMMIT'); res.status(201).json(mapAddress(db.prepare('SELECT * FROM addresses WHERE id = ?').get(result.lastInsertRowid))); } catch (error) { db.exec('ROLLBACK'); res.status(400).json({ error: 'Unable to save address' }); } });
-app.patch('/api/me/addresses/:id', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; const current = db.prepare('SELECT * FROM addresses WHERE id = ? AND customer_id = ?').get(Number(req.params.id), req.user.id); if (!current) return res.status(404).json({ error: 'Address not found' }); const fullName = String(body.fullName ?? body.full_name ?? current.full_name).trim(); const phone = String(body.phone ?? current.phone).trim(); const addressLine1 = String(body.addressLine1 ?? body.address_line1 ?? current.address_line1).trim(); const city = String(body.city ?? current.city).trim(); const state = String(body.state ?? current.state).trim(); const pincode = String(body.pincode ?? current.pincode).trim(); const gstNumber = normalizeGstNumber(body.gstNumber ?? body.gst_number ?? current.gst_number ?? ''); if (gstNumber && !isValidGstNumber(gstNumber)) return res.status(400).json({ error: 'Please enter a valid GST number.' }); const makeDefault = Boolean(body.isDefault ?? body.is_default); if (makeDefault) db.prepare('UPDATE addresses SET is_default = 0 WHERE customer_id = ?').run(req.user.id); db.prepare('UPDATE addresses SET type = ?, full_name = ?, phone = ?, gst_number = ?, address_line1 = ?, address_line2 = ?, area = ?, city = ?, state = ?, pincode = ?, is_default = ?, updated_at = ? WHERE id = ? AND customer_id = ?').run(body.type || current.type, fullName, phone, gstNumber || null, addressLine1, String(body.addressLine2 ?? body.address_line2 ?? current.address_line2).trim(), String(body.area ?? current.area).trim(), city, state, pincode, makeDefault ? 1 : current.is_default, now(), current.id, req.user.id); res.json(mapAddress(db.prepare('SELECT * FROM addresses WHERE id = ?').get(current.id))); });
+app.post('/api/me/addresses', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; console.log('[api/me/addresses]', { method: req.method, path: req.path, contentType: req.headers['content-type'], body: { fullName: body.fullName ?? body.full_name, phone: body.phone, addressLine1: body.addressLine1 ?? body.address_line1, city: body.city, state: body.state, pincode: body.pincode, gstNumber: body.gstNumber ?? body.gst_number, isDefault: body.isDefault ?? body.is_default } }); const fullName = String(body.fullName ?? body.full_name ?? '').trim(); const phone = String(body.phone ?? '').trim(); const addressLine1 = String(body.addressLine1 ?? body.address_line1 ?? '').trim(); const city = String(body.city ?? '').trim(); const state = String(body.state ?? '').trim(); const pincode = String(body.pincode ?? '').trim(); const gstNumber = normalizeGstNumber(body.gstNumber ?? body.gst_number ?? ''); const required = [fullName, phone, addressLine1, city, state, pincode]; if (required.some((field) => !field) || !/^\d{10}$/.test(phone.replace(/\D/g, '')) || !/^\d{6}$/.test(pincode.trim())) return res.status(400).json({ error: 'Please provide valid required address details' }); if (gstNumber && !isValidGstNumber(gstNumber)) return res.status(400).json({ error: 'Please enter a valid GST number.' }); const timestamp = now(); const makeDefault = Boolean(body.isDefault ?? body.is_default) || !db.prepare('SELECT 1 FROM addresses WHERE customer_id = ? LIMIT 1').get(req.user.id); const addressType = ['Home', 'Office', 'Other'].includes(String(body.type ?? body.address_type ?? '').trim()) ? (body.type ?? body.address_type) : 'Home'; const area = String(body.area ?? body.addressLine2 ?? body.address_line2 ?? '').trim(); const insert = db.prepare('INSERT INTO addresses (customer_id,type,full_name,phone,gst_number,address_line1,address_line2,area,city,state,pincode,is_default,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)'); db.exec('BEGIN'); try { if (makeDefault) db.prepare('UPDATE addresses SET is_default = ? WHERE customer_id = ?').run(false, req.user.id); const result = insert.run(req.user.id, addressType, fullName, phone, gstNumber || null, addressLine1, String(body.addressLine2 ?? body.address_line2 ?? '').trim(), area, city, state, pincode, makeDefault ? true : false, timestamp, timestamp); db.exec('COMMIT'); res.status(201).json(mapAddress(db.prepare('SELECT * FROM addresses WHERE id = ?').get(result.lastInsertRowid))); } catch (error) { db.exec('ROLLBACK'); console.error('[api/me/addresses] insert failed', { message: error && error.message, stack: error && error.stack, body, userId: req.user && req.user.id }); res.status(400).json({ error: 'Unable to save address' }); } });
+app.patch('/api/me/addresses/:id', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; const current = db.prepare('SELECT * FROM addresses WHERE id = ? AND customer_id = ?').get(Number(req.params.id), req.user.id); if (!current) return res.status(404).json({ error: 'Address not found' }); const fullName = String(body.fullName ?? body.full_name ?? current.full_name).trim(); const phone = String(body.phone ?? current.phone).trim(); const addressLine1 = String(body.addressLine1 ?? body.address_line1 ?? current.address_line1).trim(); const city = String(body.city ?? current.city).trim(); const state = String(body.state ?? current.state).trim(); const pincode = String(body.pincode ?? current.pincode).trim(); const gstNumber = normalizeGstNumber(body.gstNumber ?? body.gst_number ?? current.gst_number ?? ''); if (gstNumber && !isValidGstNumber(gstNumber)) return res.status(400).json({ error: 'Please enter a valid GST number.' }); const makeDefault = Boolean(body.isDefault ?? body.is_default); if (makeDefault) db.prepare('UPDATE addresses SET is_default = ? WHERE customer_id = ?').run(false, req.user.id); db.prepare('UPDATE addresses SET type = ?, full_name = ?, phone = ?, gst_number = ?, address_line1 = ?, address_line2 = ?, area = ?, city = ?, state = ?, pincode = ?, is_default = ?, updated_at = ? WHERE id = ? AND customer_id = ?').run(body.type || current.type, fullName, phone, gstNumber || null, addressLine1, String(body.addressLine2 ?? body.address_line2 ?? current.address_line2).trim(), String(body.area ?? current.area).trim(), city, state, pincode, makeDefault ? true : Boolean(current.is_default), now(), current.id, req.user.id); res.json(mapAddress(db.prepare('SELECT * FROM addresses WHERE id = ?').get(current.id))); });
 app.delete('/api/me/addresses/:id', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const result = db.prepare('DELETE FROM addresses WHERE id = ? AND customer_id = ?').run(Number(req.params.id), req.user.id); if (!result.changes) return res.status(404).json({ error: 'Address not found' }); const remaining = db.prepare('SELECT id FROM addresses WHERE customer_id = ? ORDER BY created_at LIMIT 1').get(req.user.id); if (remaining) db.prepare('UPDATE addresses SET is_default = 1 WHERE id = ? AND NOT EXISTS (SELECT 1 FROM addresses WHERE customer_id = ? AND is_default = 1)').run(remaining.id, req.user.id); res.status(204).end(); });
 app.get('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const rows = db.prepare('SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC').all(req.user.id).map(mapOrder); res.json(rows); });
 app.get('/api/orders/:id', auth, (req, res) => { const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(Number(req.params.id)); if (!order) return res.status(404).json({ error: 'Order not found' }); const mapped = mapOrder(order); if (req.user.role === 'ADMIN' || Number(req.user.id) === Number(order.customer_id)) return res.json(mapped); return res.status(403).json({ error: 'You do not have access to this order' }); });
@@ -520,7 +784,17 @@ function upsertCategoryAttributes(categoryId, attributes) {
   }
 }
 app.post('/api/categories', auth, admin, (req, res) => {
-  const body = req.body || {};
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  console.log('[api/categories POST]', {
+    method: req.method,
+    path: req.path,
+    contentType: req.headers['content-type'],
+    body: {
+      name: body.name ? String(body.name).trim() : undefined,
+      slug: body.slug ? String(body.slug).trim() : undefined,
+      description: body.description ? String(body.description).trim() : undefined,
+    },
+  });
   const timestamp = now();
   const name = String(body.name || '').trim();
   const providedSlug = String(body.slug || name || '').trim();
