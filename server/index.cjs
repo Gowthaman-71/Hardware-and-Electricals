@@ -499,42 +499,22 @@ function ensureCoreAdminAccount() {
   const adminEmail = String(process.env.ADMIN_EMAIL || 'owner@murugesan.in').trim().toLowerCase();
   const adminMobile = normalizeMobile(process.env.ADMIN_MOBILE || '9361866771');
   const configuredPassword = process.env.ADMIN_PASSWORD || 'change-this-before-production';
-  const adminRows = db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE role = 'ADMIN' ORDER BY id").all();
-  const matchingEmailRows = db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE LOWER(email) = LOWER(?) ORDER BY id").all(adminEmail);
+  const existingByEmail = db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE LOWER(email) = LOWER(?) ORDER BY id LIMIT 1").get(adminEmail) || null;
+  if (existingByEmail) return;
 
-  let existingAdmin = adminRows[0] || matchingEmailRows.find((row) => row.role === 'ADMIN') || matchingEmailRows[0] || null;
-
-  if (!existingAdmin) {
-    const passwordHash = bcrypt.hashSync(configuredPassword, 12);
-    try {
-      db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').run('Store Owner', adminEmail, adminMobile, passwordHash, 'ADMIN', 'ACTIVE', now(), now());
-    } catch (insertError) {
-      const duplicateKeyMessage = String(insertError && insertError.message || '').toUpperCase();
-      if (!duplicateKeyMessage.includes('UNIQUE') && !duplicateKeyMessage.includes('DUPLICATE')) {
-        throw insertError;
-      }
-    }
-    existingAdmin = db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE LOWER(email) = LOWER(?) ORDER BY id LIMIT 1").get(adminEmail) || null;
-    if (!existingAdmin) return;
+  const passwordHash = bcrypt.hashSync(configuredPassword, 12);
+  try {
+    db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').run('Store Owner', adminEmail, adminMobile, passwordHash, 'ADMIN', 'ACTIVE', now(), now());
+  } catch (insertError) {
+    const duplicateKeyMessage = String(insertError && insertError.message || '').toLowerCase();
+    const isDuplicateEmail = insertError && insertError.code === '23505' && duplicateKeyMessage.includes('users_email_key');
+    const isSqliteDuplicateEmail = duplicateKeyMessage.includes('unique constraint failed: users.email');
+    if (!isDuplicateEmail && !isSqliteDuplicateEmail) throw insertError;
   }
 
-  if (existingAdmin.role !== 'ADMIN') {
-    db.prepare("UPDATE users SET role = 'ADMIN', status = 'ACTIVE', email = ?, mobile_number = ?, updated_at = ? WHERE id = ?").run(adminEmail, adminMobile, now(), existingAdmin.id);
-    existingAdmin = db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE id = ?").get(existingAdmin.id) || existingAdmin;
-  } else if (existingAdmin.email !== adminEmail || String(existingAdmin.mobile_number || '') !== String(adminMobile)) {
-    db.prepare("UPDATE users SET email = ?, mobile_number = ?, updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(adminEmail, adminMobile, now(), existingAdmin.id);
-    existingAdmin = db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE id = ?").get(existingAdmin.id) || existingAdmin;
-  }
-
-  for (const row of adminRows.filter((row) => row.id !== existingAdmin.id)) {
-    const staleEmail = row.email && row.email !== adminEmail ? row.email : `archived-admin-${row.id}@local.invalid`;
-    db.prepare("UPDATE users SET email = ?, mobile_number = NULL, status = 'INACTIVE', updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(staleEmail, now(), row.id);
-  }
-
-  const duplicateEmailRows = db.prepare("SELECT id, email FROM users WHERE LOWER(email) = LOWER(?) AND id != ? ORDER BY id").all(adminEmail, existingAdmin.id);
-  for (const row of duplicateEmailRows) {
-    const archivedEmail = row.email && row.email !== adminEmail ? row.email : `archived-admin-${row.id}@local.invalid`;
-    db.prepare("UPDATE users SET email = ?, mobile_number = NULL, status = 'INACTIVE', role = 'CUSTOMER', updated_at = ? WHERE id = ?").run(archivedEmail, now(), row.id);
+  const createdOrRacingAdmin = db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE LOWER(email) = LOWER(?) ORDER BY id LIMIT 1").get(adminEmail) || null;
+  if (!createdOrRacingAdmin) {
+    throw new Error('Core admin account was not found after the insert attempt');
   }
 }
 function seedDemoData() {
