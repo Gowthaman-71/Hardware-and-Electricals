@@ -499,27 +499,32 @@ function ensureCoreAdminAccount() {
   const adminEmail = String(process.env.ADMIN_EMAIL || 'owner@murugesan.in').trim().toLowerCase();
   const adminMobile = normalizeMobile(process.env.ADMIN_MOBILE || '9361866771');
   const configuredPassword = process.env.ADMIN_PASSWORD || 'change-this-before-production';
-  const adminRows = db.prepare("SELECT id, email, mobile_number, status FROM users WHERE role = 'ADMIN' ORDER BY id").all();
+  const adminRows = db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE role = 'ADMIN' ORDER BY id").all();
+  const matchingEmailRows = db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE LOWER(email) = LOWER(?) ORDER BY id").all(adminEmail);
 
-  if (!adminRows.length) {
+  const existingAdmin = adminRows[0] || matchingEmailRows.find((row) => row.role === 'ADMIN') || matchingEmailRows[0] || null;
+
+  if (!existingAdmin) {
     const passwordHash = bcrypt.hashSync(configuredPassword, 12);
     db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').run('Store Owner', adminEmail, adminMobile, passwordHash, 'ADMIN', 'ACTIVE', now(), now());
     return;
   }
 
-  const primaryAdmin = adminRows[0];
-  if (primaryAdmin.email !== adminEmail || String(primaryAdmin.mobile_number || '') !== String(adminMobile)) {
-    db.prepare("UPDATE users SET email = ?, mobile_number = ?, updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(adminEmail, adminMobile, now(), primaryAdmin.id);
+  if (existingAdmin.role !== 'ADMIN') {
+    db.prepare("UPDATE users SET role = 'ADMIN', status = 'ACTIVE', email = ?, mobile_number = ?, updated_at = ? WHERE id = ?").run(adminEmail, adminMobile, now(), existingAdmin.id);
+  } else if (existingAdmin.email !== adminEmail || String(existingAdmin.mobile_number || '') !== String(adminMobile)) {
+    db.prepare("UPDATE users SET email = ?, mobile_number = ?, updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(adminEmail, adminMobile, now(), existingAdmin.id);
   }
 
-  for (const row of adminRows.slice(1)) {
+  for (const row of adminRows.filter((row) => row.id !== existingAdmin.id)) {
     const staleEmail = row.email && row.email !== adminEmail ? row.email : `archived-admin-${row.id}@local.invalid`;
     db.prepare("UPDATE users SET email = ?, mobile_number = NULL, status = 'INACTIVE', updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(staleEmail, now(), row.id);
   }
 
-  const duplicateEmail = db.prepare("SELECT id FROM users WHERE email = ? AND role = 'ADMIN' AND id != ?").get(adminEmail, primaryAdmin.id);
-  if (duplicateEmail) {
-    db.prepare("UPDATE users SET email = ?, mobile_number = NULL, status = 'INACTIVE', updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(`archived-admin-${duplicateEmail.id}@local.invalid`, now(), duplicateEmail.id);
+  const duplicateEmailRows = db.prepare("SELECT id, email FROM users WHERE LOWER(email) = LOWER(?) AND id != ? ORDER BY id").all(adminEmail, existingAdmin.id);
+  for (const row of duplicateEmailRows) {
+    const archivedEmail = row.email && row.email !== adminEmail ? row.email : `archived-admin-${row.id}@local.invalid`;
+    db.prepare("UPDATE users SET email = ?, mobile_number = NULL, status = 'INACTIVE', role = 'CUSTOMER', updated_at = ? WHERE id = ?").run(archivedEmail, now(), row.id);
   }
 }
 function seedDemoData() {
