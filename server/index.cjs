@@ -100,7 +100,7 @@ const productSelect = `
   LEFT JOIN product_types pt ON pt.id = p.product_type_id
 `;
 
-const mapCategory = (row) => row ? {
+const mapCategory = (row, attributes = []) => row ? {
   id: Number(row.id),
   name: String(row.name || ''),
   slug: String(row.slug || ''),
@@ -112,6 +112,7 @@ const mapCategory = (row) => row ? {
   sortOrder: Number(row.sort_order || 0),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+  attributes: Array.isArray(attributes) ? attributes.map(mapAttribute) : [],
 } : null;
 const mapBrand = (row) => row ? {
   id: Number(row.id),
@@ -444,7 +445,14 @@ app.post('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER
   }
 });
 app.get('/api/catalog', (_req, res) => { const categories = db.prepare("SELECT * FROM categories WHERE status = 'ACTIVE' ORDER BY sort_order, name").all().map(mapCategory); const products = db.prepare(`${productSelect} WHERE p.status = 'ACTIVE' ORDER BY p.created_at DESC`).all().map(mapProduct); res.json({ categories, products }); });
-app.get('/api/categories', (_req, res) => res.json(db.prepare('SELECT * FROM categories ORDER BY sort_order, name').all().map(mapCategory)));
+app.get('/api/categories', (_req, res) => {
+  const rows = db.prepare('SELECT * FROM categories ORDER BY sort_order, name').all();
+  const categories = rows.map((row) => {
+    const attributes = db.prepare('SELECT * FROM attributes WHERE category_id = ? ORDER BY sort_order, name').all(row.id);
+    return mapCategory(row, attributes);
+  });
+  res.json(categories);
+});
 function upsertCategoryAttributes(categoryId, attributes) {
   if (!Array.isArray(attributes)) return;
   const attributeRows = attributes
@@ -497,8 +505,9 @@ app.post('/api/categories', auth, admin, (req, res) => {
       return res.status(409).json({ error: 'Category slug already exists' });
     }
     const result = db.prepare('INSERT INTO categories (name,slug,parent_id,image_url,description,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)').run(name, slugValue, body.parentId || null, body.imageUrl || null, body.description || '', body.status || 'ACTIVE', Number(body.sortOrder || 0), timestamp, timestamp);
-    const category = mapCategory(db.prepare('SELECT * FROM categories WHERE id = ?').get(result.lastInsertRowid));
-    upsertCategoryAttributes(category.id, body.attributes);
+    upsertCategoryAttributes(result.lastInsertRowid, body.attributes);
+    const storedAttributes = db.prepare('SELECT * FROM attributes WHERE category_id = ? ORDER BY sort_order, name').all(result.lastInsertRowid);
+    const category = mapCategory(db.prepare('SELECT * FROM categories WHERE id = ?').get(result.lastInsertRowid), storedAttributes);
     db.exec('COMMIT');
     res.status(201).json(category);
   } catch (error) {

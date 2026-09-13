@@ -38,6 +38,7 @@ function DynamicCategoryManager({
         description: category.description,
         status: category.active === false ? "INACTIVE" : "ACTIVE",
         sortOrder: category.order || 0,
+        attributes: category.attributes || [],
       }),
     });
     if (!response.ok) return notify("Unable to update category");
@@ -89,6 +90,7 @@ function DynamicCategoryManager({
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!editing?.name.trim()) return;
+    const isNewCategory = !editing.id || editing.id === 0;
     const payload = {
       name: editing.name.trim(),
       slug: editing.slug?.trim(),
@@ -97,11 +99,12 @@ function DynamicCategoryManager({
       description: editing.description || "",
       status: editing.active === false ? "INACTIVE" : "ACTIVE",
       sortOrder: editing.order || categories.length + 1,
+      attributes: editing.attributes || [],
     };
     const response = await fetch(
-      editing.id ? `/api/categories/${editing.id}` : "/api/categories",
+      isNewCategory ? "/api/categories" : `/api/categories/${editing.id}`,
       {
-        method: editing.id ? "PATCH" : "POST",
+        method: isNewCategory ? "POST" : "PATCH",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiToken}`,
@@ -155,13 +158,14 @@ function DynamicCategoryManager({
           className="button blue"
           onClick={() =>
             setEditing({
-              id: Date.now(),
+              id: 0,
               name: "",
               description: "",
               parentId: null,
               active: true,
               slug: "",
               order: categories.length + 1,
+              attributes: [],
             })
           }
         >
@@ -2976,9 +2980,12 @@ function LegacyAdminCategories({
             setCategories([
               ...categories,
               {
-                id: Date.now(),
+                id: 0,
                 name: name.trim(),
                 description: "New product category.",
+                active: true,
+                slug: "",
+                attributes: [],
               },
             ]);
             setName("");
@@ -3340,7 +3347,11 @@ function Account({
   const saveAddress = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const payload = Object.fromEntries(form.entries());
+    const payloadEntries = Array.from(form.entries()).map(([key, value]) => [
+      key,
+      typeof value === 'string' ? value : String(value),
+    ]);
+    const payload = Object.fromEntries(payloadEntries);
     const normalized = {
       type: String(payload.type || "Home").trim() || "Home",
       fullName: String(
