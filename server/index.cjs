@@ -502,18 +502,28 @@ function ensureCoreAdminAccount() {
   const adminRows = db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE role = 'ADMIN' ORDER BY id").all();
   const matchingEmailRows = db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE LOWER(email) = LOWER(?) ORDER BY id").all(adminEmail);
 
-  const existingAdmin = adminRows[0] || matchingEmailRows.find((row) => row.role === 'ADMIN') || matchingEmailRows[0] || null;
+  let existingAdmin = adminRows[0] || matchingEmailRows.find((row) => row.role === 'ADMIN') || matchingEmailRows[0] || null;
 
   if (!existingAdmin) {
     const passwordHash = bcrypt.hashSync(configuredPassword, 12);
-    db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').run('Store Owner', adminEmail, adminMobile, passwordHash, 'ADMIN', 'ACTIVE', now(), now());
-    return;
+    try {
+      db.prepare('INSERT INTO users (name,email,mobile_number,password_hash,role,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)').run('Store Owner', adminEmail, adminMobile, passwordHash, 'ADMIN', 'ACTIVE', now(), now());
+    } catch (insertError) {
+      const duplicateKeyMessage = String(insertError && insertError.message || '').toUpperCase();
+      if (!duplicateKeyMessage.includes('UNIQUE') && !duplicateKeyMessage.includes('DUPLICATE')) {
+        throw insertError;
+      }
+    }
+    existingAdmin = db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE LOWER(email) = LOWER(?) ORDER BY id LIMIT 1").get(adminEmail) || null;
+    if (!existingAdmin) return;
   }
 
   if (existingAdmin.role !== 'ADMIN') {
     db.prepare("UPDATE users SET role = 'ADMIN', status = 'ACTIVE', email = ?, mobile_number = ?, updated_at = ? WHERE id = ?").run(adminEmail, adminMobile, now(), existingAdmin.id);
+    existingAdmin = db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE id = ?").get(existingAdmin.id) || existingAdmin;
   } else if (existingAdmin.email !== adminEmail || String(existingAdmin.mobile_number || '') !== String(adminMobile)) {
     db.prepare("UPDATE users SET email = ?, mobile_number = ?, updated_at = ? WHERE id = ? AND role = 'ADMIN'").run(adminEmail, adminMobile, now(), existingAdmin.id);
+    existingAdmin = db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE id = ?").get(existingAdmin.id) || existingAdmin;
   }
 
   for (const row of adminRows.filter((row) => row.id !== existingAdmin.id)) {
