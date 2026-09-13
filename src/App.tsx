@@ -524,7 +524,7 @@ function AdminExtras({
     </>
   );
 }
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import * as XLSX from "xlsx";
 import "./App.css";
@@ -1706,7 +1706,12 @@ function Cart({
               token={customerToken}
               customer={customer}
               items={items}
-              onComplete={() => {
+              onComplete={(orderedProductIds) => {
+                setCart(
+                  items.filter(
+                    (item) => !orderedProductIds.includes(item.product.id),
+                  ),
+                );
                 onOpenAccount();
               }}
             />
@@ -3078,12 +3083,14 @@ function CustomerCheckout({
   token: string;
   customer: Customer | null;
   items: { product: Product; quantity: number }[];
-  onComplete: () => void;
+  onComplete: (orderedProductIds: number[]) => void;
 }) {
   const [addresses, setAddresses] = useState<Address[]>([]);
   const [selected, setSelected] = useState("");
   const [gstNumber, setGstNumber] = useState("");
   const [message, setMessage] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const idempotencyKey = useRef("");
   useEffect(() => {
     fetch("/api/me/addresses", {
       headers: { Authorization: `Bearer ${token}` },
@@ -3098,6 +3105,7 @@ function CustomerCheckout({
       });
   }, [token]);
   const placeOrder = async () => {
+    if (submitting) return;
     if (!items.length) {
       setMessage("Add at least one product to place an order");
       return;
@@ -3112,29 +3120,45 @@ function CustomerCheckout({
       setMessage("Please enter a valid GST number.");
       return;
     }
-    const response = await fetch("/api/me/orders", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        addressId: selected,
-        gstNumber: normalizedGst || undefined,
-        items: items.map(({ product, quantity }) => ({
-          productId: product.id,
-          name: product.name,
-          quantity,
-          price: product.price,
-        })),
-      }),
-    });
-    if (!response.ok) {
-      const result = await response.json().catch(() => ({}));
-      setMessage(result.error || "Unable to place the order. Please try again.");
-      return;
+    const checkoutFingerprint = `${customer?.id || "customer"}:${selected}:${normalizedGst}:${items
+      .map(({ product, quantity }) => `${product.id}-${quantity}`)
+      .join(",")}`;
+    if (idempotencyKey.current !== checkoutFingerprint) {
+      idempotencyKey.current = checkoutFingerprint;
     }
-    const order = (await response.json()) as CustomerOrder;
+    setSubmitting(true);
+    let order: CustomerOrder;
+    try {
+      const response = await fetch("/api/me/orders", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          addressId: selected,
+          gstNumber: normalizedGst || undefined,
+          idempotencyKey: idempotencyKey.current,
+          items: items.map(({ product, quantity }) => ({
+            productId: product.id,
+            name: product.name,
+            quantity,
+            price: product.price,
+          })),
+        }),
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        setMessage(result.error || "Unable to place the order. Please try again.");
+        return;
+      }
+      order = (await response.json()) as CustomerOrder;
+    } catch {
+      setMessage("Unable to place the order. Please try again.");
+      return;
+    } finally {
+      setSubmitting(false);
+    }
 
     const customerName = String(customer?.name || address.fullName || "Customer").trim();
     const rawMobile = String(customer?.mobile || address.phone || "").replace(/\D/g, "");
@@ -3167,12 +3191,12 @@ function CustomerCheckout({
       `Total: ${money(order.total)}`,
     ].join("\n");
 
+    onComplete(items.map(({ product }) => product.id));
     window.open(
       `https://wa.me/${businessWhatsappNumber}?text=${encodeURIComponent(orderMessage)}`,
       "_blank",
     );
     setMessage("Order placed successfully");
-    onComplete();
   };
 
   return (
@@ -3217,9 +3241,9 @@ function CustomerCheckout({
           <button
             className="button blue"
             onClick={() => void placeOrder()}
-            disabled={!items.length}
+            disabled={!items.length || submitting}
           >
-            Place order
+            {submitting ? "Placing order..." : "Place order"}
           </button>
         </>
       ) : (
@@ -3227,7 +3251,7 @@ function CustomerCheckout({
           <p>
             No saved address. Add one from My Account before placing an order.
           </p>
-          <button className="plain-button" type="button" onClick={onComplete}>
+          <button className="plain-button" type="button" onClick={() => onComplete([])}>
             Go to My Account
           </button>
         </>
