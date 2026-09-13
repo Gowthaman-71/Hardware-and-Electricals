@@ -437,6 +437,7 @@ const mapAttribute = (row) => row ? {
 const mapProduct = (row) => row ? {
   id: Number(row.id),
   sku: String(row.sku || ''),
+  code: String(row.sku || ''),
   name: String(row.name || ''),
   category: String(row.category_name || row.category || ''),
   categoryId: row.category_id == null ? null : Number(row.category_id),
@@ -706,7 +707,75 @@ app.post('/api/auth/register', (req, res) => {
 app.get('/api/me', auth, (req, res) => { const user = db.prepare('SELECT id,name,email,mobile_number AS mobile FROM users WHERE id = ? AND role = ? AND status = ?').get(req.user.id, 'CUSTOMER', 'ACTIVE'); if (!user) return res.status(404).json({ error: 'Customer account not found' }); res.json({ id: user.id, name: user.name, email: user.email, mobile: user.mobile }); });
 app.patch('/api/me', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const name = String(req.body.name || '').trim(); if (!name) return res.status(400).json({ error: 'Full name is required' }); db.prepare('UPDATE users SET name = ?, updated_at = ? WHERE id = ? AND role = ?').run(name, now(), req.user.id, 'CUSTOMER'); res.json(db.prepare('SELECT id,name,email,mobile_number AS mobile FROM users WHERE id = ?').get(req.user.id)); });
 app.get('/api/me/addresses', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); res.json(db.prepare('SELECT * FROM addresses WHERE customer_id = ? ORDER BY is_default DESC, created_at DESC').all(req.user.id).map(mapAddress)); });
-app.post('/api/me/addresses', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; console.log('[api/me/addresses]', { method: req.method, path: req.path, contentType: req.headers['content-type'], body: { fullName: body.fullName ?? body.full_name, phone: body.phone, addressLine1: body.addressLine1 ?? body.address_line1, city: body.city, state: body.state, pincode: body.pincode, gstNumber: body.gstNumber ?? body.gst_number, isDefault: body.isDefault ?? body.is_default } }); const fullName = String(body.fullName ?? body.full_name ?? '').trim(); const phone = String(body.phone ?? '').trim(); const addressLine1 = String(body.addressLine1 ?? body.address_line1 ?? '').trim(); const city = String(body.city ?? '').trim(); const state = String(body.state ?? '').trim(); const pincode = String(body.pincode ?? '').trim(); const gstNumber = normalizeGstNumber(body.gstNumber ?? body.gst_number ?? ''); const required = [fullName, phone, addressLine1, city, state, pincode]; if (required.some((field) => !field) || !/^\d{10}$/.test(phone.replace(/\D/g, '')) || !/^\d{6}$/.test(pincode.trim())) return res.status(400).json({ error: 'Please provide valid required address details' }); if (gstNumber && !isValidGstNumber(gstNumber)) return res.status(400).json({ error: 'Please enter a valid GST number.' }); const timestamp = now(); const makeDefault = Boolean(body.isDefault ?? body.is_default) || !db.prepare('SELECT 1 FROM addresses WHERE customer_id = ? LIMIT 1').get(req.user.id); const addressType = ['Home', 'Office', 'Other'].includes(String(body.type ?? body.address_type ?? '').trim()) ? (body.type ?? body.address_type) : 'Home'; const area = String(body.area ?? body.addressLine2 ?? body.address_line2 ?? '').trim(); const insert = db.prepare('INSERT INTO addresses (customer_id,type,full_name,phone,gst_number,address_line1,address_line2,area,city,state,pincode,is_default,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)'); db.exec('BEGIN'); try { if (makeDefault) db.prepare('UPDATE addresses SET is_default = ? WHERE customer_id = ?').run(false, req.user.id); const result = insert.run(req.user.id, addressType, fullName, phone, gstNumber || null, addressLine1, String(body.addressLine2 ?? body.address_line2 ?? '').trim(), area, city, state, pincode, makeDefault ? true : false, timestamp, timestamp); db.exec('COMMIT'); res.status(201).json(mapAddress(db.prepare('SELECT * FROM addresses WHERE id = ?').get(result.lastInsertRowid))); } catch (error) { db.exec('ROLLBACK'); console.error('[api/me/addresses] insert failed', { message: error && error.message, stack: error && error.stack, body, userId: req.user && req.user.id }); res.status(400).json({ error: 'Unable to save address' }); } });
+app.post('/api/me/addresses', auth, (req, res) => {
+  if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' });
+  const body = req.body || {};
+  console.log('[api/me/addresses]', {
+    method: req.method,
+    path: req.path,
+    contentType: req.headers['content-type'],
+    body: {
+      fullName: body.fullName ?? body.full_name,
+      phone: body.phone,
+      addressLine1: body.addressLine1 ?? body.address_line1,
+      city: body.city,
+      state: body.state,
+      pincode: body.pincode,
+      gstNumber: body.gstNumber ?? body.gst_number,
+      isDefault: body.isDefault ?? body.is_default,
+    },
+  });
+
+  const fullName = String(body.fullName ?? body.full_name ?? '').trim();
+  const phone = String(body.phone ?? '').trim();
+  const addressLine1 = String(body.addressLine1 ?? body.address_line1 ?? '').trim();
+  const city = String(body.city ?? '').trim();
+  const state = String(body.state ?? '').trim();
+  const pincode = String(body.pincode ?? '').trim();
+  const gstNumber = normalizeGstNumber(body.gstNumber ?? body.gst_number ?? '');
+  const required = [fullName, phone, addressLine1, city, state, pincode];
+  if (required.some((field) => !field) || !/^\d{10}$/.test(phone.replace(/\D/g, '')) || !/^\d{6}$/.test(pincode.trim())) {
+    return res.status(400).json({ error: 'Please provide valid required address details' });
+  }
+  if (gstNumber && !isValidGstNumber(gstNumber)) {
+    return res.status(400).json({ error: 'Please enter a valid GST number.' });
+  }
+
+  const timestamp = now();
+  const makeDefault = Boolean(body.isDefault ?? body.is_default) || !db.prepare('SELECT 1 FROM addresses WHERE customer_id = ? LIMIT 1').get(req.user.id);
+  const addressType = ['Home', 'Office', 'Other'].includes(String(body.type ?? body.address_type ?? '').trim()) ? (body.type ?? body.address_type) : 'Home';
+  const area = String(body.area ?? body.addressLine2 ?? body.address_line2 ?? '').trim();
+  const addressLine2 = String(body.addressLine2 ?? body.address_line2 ?? '').trim();
+
+  try {
+    if (makeDefault) {
+      db.prepare('UPDATE addresses SET is_default = 0 WHERE customer_id = ?').run(req.user.id);
+    }
+
+    const result = db.prepare('INSERT INTO addresses (customer_id,type,full_name,phone,gst_number,address_line1,address_line2,area,city,state,pincode,is_default,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
+      req.user.id,
+      addressType,
+      fullName,
+      phone,
+      gstNumber || null,
+      addressLine1,
+      addressLine2,
+      area,
+      city,
+      state,
+      pincode,
+      makeDefault ? 1 : 0,
+      timestamp,
+      timestamp,
+    );
+
+    const row = db.prepare('SELECT * FROM addresses WHERE id = ?').get(result.lastInsertRowid);
+    res.status(201).json(mapAddress(row));
+  } catch (error) {
+    console.error('[api/me/addresses] insert failed', { message: error && error.message, stack: error && error.stack, body, userId: req.user && req.user.id });
+    res.status(400).json({ error: 'Unable to save address' });
+  }
+});
 app.patch('/api/me/addresses/:id', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; const current = db.prepare('SELECT * FROM addresses WHERE id = ? AND customer_id = ?').get(Number(req.params.id), req.user.id); if (!current) return res.status(404).json({ error: 'Address not found' }); const fullName = String(body.fullName ?? body.full_name ?? current.full_name).trim(); const phone = String(body.phone ?? current.phone).trim(); const addressLine1 = String(body.addressLine1 ?? body.address_line1 ?? current.address_line1).trim(); const city = String(body.city ?? current.city).trim(); const state = String(body.state ?? current.state).trim(); const pincode = String(body.pincode ?? current.pincode).trim(); const gstNumber = normalizeGstNumber(body.gstNumber ?? body.gst_number ?? current.gst_number ?? ''); if (gstNumber && !isValidGstNumber(gstNumber)) return res.status(400).json({ error: 'Please enter a valid GST number.' }); const makeDefault = Boolean(body.isDefault ?? body.is_default); if (makeDefault) db.prepare('UPDATE addresses SET is_default = ? WHERE customer_id = ?').run(false, req.user.id); db.prepare('UPDATE addresses SET type = ?, full_name = ?, phone = ?, gst_number = ?, address_line1 = ?, address_line2 = ?, area = ?, city = ?, state = ?, pincode = ?, is_default = ?, updated_at = ? WHERE id = ? AND customer_id = ?').run(body.type || current.type, fullName, phone, gstNumber || null, addressLine1, String(body.addressLine2 ?? body.address_line2 ?? current.address_line2).trim(), String(body.area ?? current.area).trim(), city, state, pincode, makeDefault ? true : Boolean(current.is_default), now(), current.id, req.user.id); res.json(mapAddress(db.prepare('SELECT * FROM addresses WHERE id = ?').get(current.id))); });
 app.delete('/api/me/addresses/:id', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const result = db.prepare('DELETE FROM addresses WHERE id = ? AND customer_id = ?').run(Number(req.params.id), req.user.id); if (!result.changes) return res.status(404).json({ error: 'Address not found' }); const remaining = db.prepare('SELECT id FROM addresses WHERE customer_id = ? ORDER BY created_at LIMIT 1').get(req.user.id); if (remaining) db.prepare('UPDATE addresses SET is_default = 1 WHERE id = ? AND NOT EXISTS (SELECT 1 FROM addresses WHERE customer_id = ? AND is_default = 1)').run(remaining.id, req.user.id); res.status(204).end(); });
 app.get('/api/me/orders', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const rows = db.prepare('SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC').all(req.user.id).map(mapOrder); res.json(rows); });
@@ -1079,7 +1148,7 @@ app.post('/api/products/bulk-import', auth, admin, (req, res) => {
   res.json({ success: true, total: rows.length, imported, skipped, failed, results });
 });
 app.post('/api/products', auth, admin, (req, res) => { const body = req.body || {}; const sku = String(body.sku || '').trim(); const name = String(body.name || '').trim(); const categoryId = Number(body.categoryId); const price = Number(body.price); const stock = normalizeStockValue(body.stock); if (!sku || !name || !categoryId || !Number.isFinite(price) || price < 0 || !Number.isInteger(stock) || stock < 0) return res.status(400).json({ error: 'SKU, product name, category, valid price and stock are required' }); const timestamp = now(); try { const brandId = body.brandId || db.prepare('SELECT id FROM brands WHERE name = ? COLLATE NOCASE').get(String(body.brand || '').trim())?.id || null; const result = db.prepare('INSERT INTO products (sku,name,slug,category_id,brand_id,product_type_id,description,details,price,mrp,discount,stock,unit,image_url,image_urls_json,attributes_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(sku, name, slugify(`${name}-${sku}`), categoryId, brandId, body.productTypeId || null, body.description || '', body.details || '', price, Number(body.mrp || price), Number(body.discount || 0), stock, body.unit || 'Nos', body.imageUrl || null, JSON.stringify(body.imageUrls || []), JSON.stringify(body.attributes || {}), body.status || 'ACTIVE', timestamp, timestamp); const product = mapProduct(db.prepare(`${productSelect} WHERE p.id = ?`).get(result.lastInsertRowid)); if (!product) return res.status(500).json({ error: 'Product persisted but could not be loaded' }); res.status(201).json(product); } catch (error) { res.status(error.message.includes('UNIQUE') ? 409 : 400).json({ error: error.message.includes('UNIQUE') ? 'SKU already exists' : 'Unable to create product' }); } });
-app.patch('/api/products/:id', auth, admin, (req, res) => { const body = req.body || {}; const id = Number(req.params.id); const current = db.prepare('SELECT * FROM products WHERE id = ?').get(id); if (!current) return res.status(404).json({ error: 'Product not found' }); const values = { name: body.name == null ? current.name : String(body.name).trim(), categoryId: body.categoryId == null ? current.category_id : Number(body.categoryId), price: body.price == null ? current.price : Number(body.price), stock: body.stock == null ? current.stock : normalizeStockValue(body.stock) }; if (!values.name || !values.categoryId || !Number.isFinite(values.price) || values.price < 0 || !Number.isInteger(values.stock) || values.stock < 0) return res.status(400).json({ error: 'Invalid product data' }); const timestamp = now(); try { const brandId = body.brandId || db.prepare('SELECT id FROM brands WHERE name = ? COLLATE NOCASE').get(String(body.brand || '').trim())?.id || current.brand_id; db.prepare('UPDATE products SET name = ?, category_id = ?, brand_id = ?, product_type_id = ?, description = ?, details = ?, price = ?, mrp = ?, discount = ?, stock = ?, unit = ?, image_url = ?, image_urls_json = ?, attributes_json = ?, status = ?, updated_at = ? WHERE id = ?').run(values.name, values.categoryId, brandId, body.productTypeId ?? current.product_type_id, body.description ?? current.description, body.details ?? current.details, values.price, body.mrp ?? current.mrp, body.discount ?? current.discount, values.stock, body.unit ?? current.unit, body.imageUrl ?? current.image_url, JSON.stringify(body.imageUrls ?? safeJson(current.image_urls_json, [])), JSON.stringify(body.attributes ?? safeJson(current.attributes_json, {})), body.status ?? current.status, timestamp, id); const product = mapProduct(db.prepare(`${productSelect} WHERE p.id = ?`).get(id)); if (!product) return res.status(500).json({ error: 'Product updated but could not be reloaded' }); res.json(product); } catch { res.status(400).json({ error: 'Unable to update product' }); } });
+app.patch('/api/products/:id', auth, admin, (req, res) => { const body = req.body || {}; const id = Number(req.params.id); const current = db.prepare('SELECT * FROM products WHERE id = ?').get(id); if (!current) return res.status(404).json({ error: 'Product not found' }); const stockOnly = Object.prototype.hasOwnProperty.call(body, 'stock') && Object.keys(body).every((key) => key === 'stock'); if (stockOnly) { const rawStock = String(body.stock ?? '').trim(); const stock = Number(rawStock); if (!rawStock || !Number.isInteger(stock) || !Number.isFinite(stock) || stock < 0) return res.status(400).json({ error: 'Invalid stock value' }); try { db.prepare('UPDATE products SET stock = ?, updated_at = ? WHERE id = ?').run(stock, now(), id); const product = mapProduct(db.prepare(`${productSelect} WHERE p.id = ?`).get(id)); if (!product) return res.status(500).json({ error: 'Product updated but could not be reloaded' }); return res.json(product); } catch { return res.status(400).json({ error: 'Unable to update product stock' }); } } const values = { name: body.name == null ? current.name : String(body.name).trim(), categoryId: body.categoryId == null ? current.category_id : Number(body.categoryId), price: body.price == null ? current.price : Number(body.price), stock: body.stock == null ? current.stock : normalizeStockValue(body.stock) }; if (!values.name || !values.categoryId || !Number.isFinite(values.price) || values.price < 0 || !Number.isInteger(values.stock) || values.stock < 0) return res.status(400).json({ error: 'Invalid product data' }); const timestamp = now(); try { const brandId = body.brandId || db.prepare('SELECT id FROM brands WHERE name = ? COLLATE NOCASE').get(String(body.brand || '').trim())?.id || current.brand_id; db.prepare('UPDATE products SET name = ?, category_id = ?, brand_id = ?, product_type_id = ?, description = ?, details = ?, price = ?, mrp = ?, discount = ?, stock = ?, unit = ?, image_url = ?, image_urls_json = ?, attributes_json = ?, status = ?, updated_at = ? WHERE id = ?').run(values.name, values.categoryId, brandId, body.productTypeId ?? current.product_type_id, body.description ?? current.description, body.details ?? current.details, values.price, body.mrp ?? current.mrp, body.discount ?? current.discount, values.stock, body.unit ?? current.unit, body.imageUrl ?? current.image_url, JSON.stringify(body.imageUrls ?? safeJson(current.image_urls_json, [])), JSON.stringify(body.attributes ?? safeJson(current.attributes_json, {})), body.status ?? current.status, timestamp, id); const product = mapProduct(db.prepare(`${productSelect} WHERE p.id = ?`).get(id)); if (!product) return res.status(500).json({ error: 'Product updated but could not be reloaded' }); res.json(product); } catch { res.status(400).json({ error: 'Unable to update product' }); } });
 app.patch('/api/products/:id/archive', auth, admin, (req, res) => { const result = db.prepare("UPDATE products SET status = 'ARCHIVED', updated_at = ? WHERE id = ?").run(now(), Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Product not found' }); res.status(204).end(); });
 app.post('/api/images', auth, admin, upload.single('image'), (req, res) => { if (!req.file) return res.status(400).json({ error: 'Image is required' }); const safeName = path.basename(req.file.originalname || 'upload').replace(/[^a-zA-Z0-9._-]/g, '_'); const safePath = path.join(uploadDirectory, `${Date.now()}-${safeName}`); fs.renameSync(req.file.path, safePath); res.status(201).json({ url: `/uploads/${path.basename(safePath)}` }); });
 app.get('/api/admin/stats', auth, admin, (_req, res) => { const count = (sql) => db.prepare(sql).get().count; res.json({ products: count("SELECT COUNT(*) count FROM products WHERE status != 'ARCHIVED'"), categories: count("SELECT COUNT(*) count FROM categories WHERE status != 'ARCHIVED'"), brands: count("SELECT COUNT(*) count FROM brands WHERE status != 'ARCHIVED'"), customers: count("SELECT COUNT(*) count FROM users WHERE role = 'CUSTOMER'"), orders: count('SELECT COUNT(*) count FROM orders'), revenue: Number(db.prepare('SELECT COALESCE(SUM(total), 0) total FROM orders').get().total || 0) }); });

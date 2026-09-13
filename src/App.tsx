@@ -526,7 +526,7 @@ function AdminExtras({
   );
 }
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ChangeEvent } from "react";
+import type { ChangeEvent, Dispatch, SetStateAction } from "react";
 import * as XLSX from "xlsx";
 import "./App.css";
 import "./motion.css";
@@ -729,6 +729,20 @@ async function saveProductRequest(
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result.error || "Unable to save product");
+  return result as Product;
+}
+async function saveProductStockRequest(
+  token: string,
+  productId: number,
+  stock: number,
+): Promise<Product> {
+  const response = await fetch(`/api/products/${productId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ stock }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || "Unable to update stock");
   return result as Product;
 }
 function Logo({ compact = false }: { compact?: boolean }) {
@@ -1930,7 +1944,7 @@ function BulkProductImport({
 }: {
   products: Product[];
   categories: Category[];
-  setProducts: (items: Product[]) => void;
+  setProducts: Dispatch<SetStateAction<Product[]>>;
   notify: (message: string) => void;
 }) {
   const [categoryId, setCategoryId] = useState("");
@@ -2239,7 +2253,7 @@ function Admin({
   setView: (view: string) => void;
   products: Product[];
   categories: Category[];
-  setProducts: (items: Product[]) => void;
+  setProducts: Dispatch<SetStateAction<Product[]>>;
   setCategories: (items: Category[]) => void;
   editing: Product | null;
   setEditing: (product: Product | null) => void;
@@ -2717,7 +2731,7 @@ function AdminProducts({
 }: {
   products: Product[];
   categories: Category[];
-  setProducts: (items: Product[]) => void;
+  setProducts: Dispatch<SetStateAction<Product[]>>;
   editing: Product | null;
   setEditing: (product: Product | null) => void;
   notify: (message: string) => void;
@@ -2728,6 +2742,7 @@ function AdminProducts({
   const [category, setCategory] = useState("All");
   const [status, setStatus] = useState("All");
   const [inlineStockDrafts, setInlineStockDrafts] = useState<Record<number, string>>({});
+  const [savingStock, setSavingStock] = useState<Record<number, boolean>>({});
   const visible = products.filter(
     (p) =>
       `${p.name} ${p.code} ${p.brand} ${p.category}`
@@ -2752,13 +2767,17 @@ function AdminProducts({
       setInlineStockDrafts((current) => ({ ...current, [product.id]: String(stock) }));
       return;
     }
+    if (savingStock[product.id]) return;
+    setSavingStock((current) => ({ ...current, [product.id]: true }));
     try {
-      const saved = await saveProductRequest(apiToken, { ...product, stock }, categories);
-      setProducts(products.map((item) => (item.id === saved.id ? saved : item)));
+      const saved = await saveProductStockRequest(apiToken, product.id, stock);
+      setProducts((current) => current.map((item) => (item.id === saved.id ? saved : item)));
       setInlineStockDrafts((current) => ({ ...current, [product.id]: String(saved.stock) }));
     } catch (reason) {
       setInlineStockDrafts((current) => ({ ...current, [product.id]: String(product.stock) }));
       notify(reason instanceof Error ? reason.message : "Unable to update stock. Please try again.");
+    } finally {
+      setSavingStock((current) => ({ ...current, [product.id]: false }));
     }
   };
   const save = async (product: Product) => {
@@ -2879,6 +2898,10 @@ function AdminProducts({
                     [p.id]: current[p.id] ?? String(p.stock),
                   }));
                 }}
+                onClick={(e) => {
+                  if (document.activeElement !== e.currentTarget) return;
+                  e.currentTarget.select();
+                }}
                 onChange={(e) => {
                   const nextValue = e.target.value;
                   setInlineStockDrafts((current) => ({
@@ -2886,13 +2909,13 @@ function AdminProducts({
                     [p.id]: nextValue,
                   }));
                 }}
-                onBlur={() => {
-                  void commitInlineStock(p, inlineStockDrafts[p.id] ?? String(p.stock));
+                onBlur={(e) => {
+                  void commitInlineStock(p, e.currentTarget.value);
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     e.preventDefault();
-                    void commitInlineStock(p, inlineStockDrafts[p.id] ?? String(p.stock));
+                    void commitInlineStock(p, e.currentTarget.value);
                   }
                   if (e.key === "Escape") {
                     setInlineStockDrafts((current) => ({
