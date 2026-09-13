@@ -1916,13 +1916,13 @@ function makeProduct(
     code: value("SKU") || value("Product Code"),
     category,
     brand: value("Brand"),
-    price: Number(valueAny("Price", "Price (₹)")),
+    price: Number(valueAny("Price", "Price (₹)", "Price ₹")),
     mrp: Number(valueAny("MRP", "MRP (₹)")) || Number(valueAny("Price", "Price (₹)")),
-    stock: Number(valueAny("Stock", "Stock Qty")),
+    stock: Number(valueAny("Stock", "Stock Qty", "Stock Quantity", "Quantity")),
     unit: value("Unit") || "Nos",
     image: valueAny("Image URL", "Image 1"),
     description: value("Description"),
-    details: value("Product Type"),
+    details: valueAny("Product Type", "Subcategory"),
     status:
       value("Status").toLowerCase() === "inactive" ? "Inactive" : "Active",
     attributes: Object.fromEntries(
@@ -1952,6 +1952,7 @@ function BulkProductImport({
   const [items, setItems] = useState<ImportItem[]>([]);
   const [errors, setErrors] = useState<ImportError[]>([]);
   const [fileName, setFileName] = useState("");
+  const [totalRows, setTotalRows] = useState(0);
   const selectedCategory = categories.find(
     (category) => String(category.id) === categoryId,
   );
@@ -1976,6 +1977,14 @@ function BulkProductImport({
       { header: 1, defval: "" },
     );
     const headers = (rows.shift() || []).map(String);
+    setTotalRows(rows.length);
+    console.debug("[bulk-import] parsed file", {
+      fileName: file.name,
+      fileType: file.type,
+      fileSize: file.size,
+      rows: rows.length,
+      normalizedHeaders: headers.map(headerKey),
+    });
     const seen = new Set<string>();
     const nextItems: ImportItem[] = [];
     const nextErrors: ImportError[] = [];
@@ -1987,6 +1996,8 @@ function BulkProductImport({
           String(row[column] ?? "").trim(),
         ]),
       );
+      const rawValue = (...names: string[]) =>
+        names.map((name) => raw[headerKey(name)] || "").find(Boolean) || "";
       const product = makeProduct(raw, rowNumber, categories);
       const sku = product.code;
       const error = (field: string, message: string) =>
@@ -1994,13 +2005,12 @@ function BulkProductImport({
       if (!sku) error("SKU", "SKU is required");
       if (seen.has(sku.toLowerCase()))
         error("SKU", "Duplicate SKU in this file");
-      if (
-        products.some(
-          (item) => item.code.toLowerCase() === sku.toLowerCase(),
-        ) &&
-        duplicateMode === "skip"
-      )
-        error("SKU", "SKU already exists");
+      const existingSku = products.some(
+        (item) => item.code.toLowerCase() === sku.toLowerCase(),
+      );
+      if (existingSku && duplicateMode === "update") {
+        // Existing products are sent to the server for the selected update mode.
+      }
       if (!product.name) error("Product Name", "Product name is required");
       if (
         !categories.some(
@@ -2009,9 +2019,11 @@ function BulkProductImport({
         )
       )
         error("Category", `Category "${product.category}" does not exist`);
-      if (!Number.isFinite(product.price) || product.price <= 0)
-        error("Price", "Price must be greater than 0");
-      if (!Number.isFinite(product.stock) || product.stock < 0)
+      const priceText = rawValue("Price", "Price (₹)", "Price ₹");
+      const stockText = rawValue("Stock", "Stock Qty", "Stock Quantity", "Quantity");
+      if (!priceText || !Number.isFinite(product.price) || product.price < 0)
+        error("Price", "Price must be a number greater than or equal to 0");
+      if (!stockText || !Number.isFinite(product.stock) || !Number.isInteger(product.stock) || product.stock < 0)
         error("Stock", "Stock must be zero or greater");
       const discount = Number(raw.discount || 0);
       if (!Number.isFinite(discount) || discount < 0 || discount > 100)
@@ -2026,7 +2038,7 @@ function BulkProductImport({
     setErrors(nextErrors);
   };
   const importProducts = async () => {
-    if (errors.length || !items.length) return;
+    if (!items.length) return;
     if (
       !window.confirm(
         `Import ${items.length} valid product${items.length === 1 ? "" : "s"}?`,
@@ -2191,7 +2203,7 @@ function BulkProductImport({
             <div>
               <p className="eyebrow">VALIDATION RESULTS</p>
               <h2>
-                {items.length} valid products · {errors.length} errors
+                {totalRows} rows · {items.length} valid products · {errors.length} errors
               </h2>
             </div>
             <div>
@@ -2200,7 +2212,7 @@ function BulkProductImport({
                   Download Error Report
                 </button>
               )}
-              {!errors.length && items.length > 0 && (
+              {items.length > 0 && (
                 <button className="button blue" onClick={importProducts}>
                   Import Products
                 </button>

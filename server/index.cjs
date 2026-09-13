@@ -1078,8 +1078,10 @@ app.post('/api/products/bulk-import', auth, admin, (req, res) => {
     const sku = String(product?.sku || product?.code || '').trim();
     const name = String(product?.name || '').trim();
     const categoryId = Number(product?.categoryId);
-    const price = Number(product?.price);
-    const stock = Number(product?.stock ?? 0);
+    const priceText = String(product?.price ?? '').trim();
+    const stockText = String(product?.stock ?? '').trim();
+    const price = Number(priceText);
+    const stock = Number(stockText);
     const errors = [];
     const normalizedSku = sku.toLowerCase();
     if (!sku) errors.push('Missing SKU');
@@ -1087,8 +1089,8 @@ app.post('/api/products/bulk-import', auth, admin, (req, res) => {
     if (sku) seenSkus.add(normalizedSku);
     if (!name) errors.push('Missing product name');
     if (!Number.isInteger(categoryId) || categoryId <= 0) errors.push('Invalid category');
-    if (!Number.isFinite(price) || price < 0) errors.push('Invalid price');
-    if (!Number.isInteger(stock) || stock < 0) errors.push('Invalid stock');
+    if (!priceText || !Number.isFinite(price) || price < 0) errors.push('Invalid price');
+    if (!stockText || !Number.isInteger(stock) || stock < 0) errors.push('Invalid stock');
     const discount = Number(product?.discount ?? 0);
     if (!Number.isFinite(discount) || discount < 0 || discount > 100) errors.push('Invalid discount');
     const status = String(product?.status || 'ACTIVE').toUpperCase();
@@ -1116,17 +1118,28 @@ app.post('/api/products/bulk-import', auth, admin, (req, res) => {
       const product = item.product;
       const brandName = String(product.brand || '').trim();
       const brand = brandName ? db.prepare('SELECT id FROM brands WHERE LOWER(name) = LOWER(?) LIMIT 1').get(brandName) : null;
-      const productTypeName = String(product.productType || '').trim();
-      const productType = productTypeName ? db.prepare('SELECT id FROM product_types WHERE category_id = ? AND LOWER(name) = LOWER(?) LIMIT 1').get(item.categoryId, productTypeName) : null;
-      if (brandName && !brand) {
-        results.push({ row: item.row, sku: item.sku, status: 'failed', reason: `Brand "${brandName}" not found` });
-        continue;
+      const productTypeName = String(product.productType || product.details || '').trim();
+      let resolvedBrand = brand;
+      if (brandName && !resolvedBrand) {
+        try {
+          const brandResult = db.prepare('INSERT INTO brands (name,slug,description,status,created_at,updated_at) VALUES (?,?,?,?,?,?)').run(brandName, slugify(brandName), '', 'ACTIVE', timestamp, timestamp);
+          resolvedBrand = db.prepare('SELECT id FROM brands WHERE id = ?').get(brandResult.lastInsertRowid);
+        } catch (error) {
+          if (!String(error?.message || '').match(/UNIQUE|duplicate/i)) throw error;
+          resolvedBrand = db.prepare('SELECT id FROM brands WHERE LOWER(name) = LOWER(?) LIMIT 1').get(brandName);
+        }
       }
-      if (productTypeName && !productType) {
-        results.push({ row: item.row, sku: item.sku, status: 'failed', reason: `Product type "${productTypeName}" not found for category` });
-        continue;
+      let resolvedProductType = productTypeName ? db.prepare('SELECT id FROM product_types WHERE category_id = ? AND LOWER(name) = LOWER(?) LIMIT 1').get(item.categoryId, productTypeName) : null;
+      if (productTypeName && !resolvedProductType) {
+        try {
+          const typeResult = db.prepare('INSERT INTO product_types (category_id,name,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?)').run(item.categoryId, productTypeName, 'ACTIVE', 0, timestamp, timestamp);
+          resolvedProductType = db.prepare('SELECT id FROM product_types WHERE id = ?').get(typeResult.lastInsertRowid);
+        } catch (error) {
+          if (!String(error?.message || '').match(/UNIQUE|duplicate/i)) throw error;
+          resolvedProductType = db.prepare('SELECT id FROM product_types WHERE category_id = ? AND LOWER(name) = LOWER(?) LIMIT 1').get(item.categoryId, productTypeName);
+        }
       }
-      const values = [item.name, item.categoryId, brand?.id || null, productType?.id || null, String(product.description || ''), String(product.details || ''), item.price, Number(product.mrp || item.price), item.discount, item.stock, String(product.unit || 'Nos'), product.imageUrl || product.image || null, JSON.stringify(Array.isArray(product.imageUrls) ? product.imageUrls : []), JSON.stringify(product.attributes || {}), item.status];
+      const values = [item.name, item.categoryId, resolvedBrand?.id || null, resolvedProductType?.id || null, String(product.description || ''), String(product.details || ''), item.price, Number(product.mrp || item.price), item.discount, item.stock, String(product.unit || 'Nos'), product.imageUrl || product.image || null, JSON.stringify(Array.isArray(product.imageUrls) ? product.imageUrls : []), JSON.stringify(product.attributes || {}), item.status];
       const insertValues = values.slice(1);
       if (existing) {
         updateProduct.run(...values, timestamp, existing.id);
