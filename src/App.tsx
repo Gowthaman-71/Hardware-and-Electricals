@@ -803,7 +803,9 @@ async function saveProductRequest(
   product: Product,
   categories: Category[],
 ): Promise<Product> {
-  const categoryId = product.categoryId || categories.find((item) => item.name === product.category)?.id;
+  // Filter to only ACTIVE categories for product assignment
+  const activeCategories = categories.filter(c => c.status !== "ARCHIVED" && c.active !== false);
+  const categoryId = product.categoryId || activeCategories.find((item) => item.name === product.category)?.id;
   if (!product.code.trim() || !product.name.trim() || !categoryId) throw new Error("Product code, name and category are required");
   const sanitizedStock = normalizeProductStock(product.stock);
   const response = await fetch(product.id ? `/api/products/${product.id}` : "/api/products", {
@@ -936,17 +938,10 @@ function App() {
       }
     };
     void refreshCatalog();
-    const interval = window.setInterval(() => { void refreshCatalog(); }, 60000); // Refresh every 60 seconds
-    const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") void refreshCatalog();
-    };
-    window.addEventListener("focus", () => { void refreshCatalog(); });
-    document.addEventListener("visibilitychange", refreshWhenVisible);
+    // Removed: aggressive auto-refresh causing performance issues
+    // Only refresh on initial mount - admin can manually refresh if needed
     return () => {
       mounted = false;
-      window.clearInterval(interval);
-      window.removeEventListener("focus", () => { void refreshCatalog(); });
-      document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
   }, []);
   useEffect(() => {
@@ -1789,6 +1784,8 @@ function Cart({
                         ),
                       )
                     }
+                    disabled={quantity <= 1}
+                    style={{ opacity: quantity <= 1 ? 0.4 : 1, cursor: quantity <= 1 ? 'not-allowed' : 'pointer' }}
                   >
                     −
                   </button>
@@ -2476,11 +2473,13 @@ function Admin({
   );
 }
 function emptyProduct(categories: Category[]): Product {
+  // Filter to active categories only for new products
+  const activeCategories = categories.filter(c => c.status !== "ARCHIVED" && c.active !== false);
   return {
     id: 0,
     name: "",
     code: "",
-    category: categories[0]?.name || "Electrical Switches",
+    category: activeCategories[0]?.name || categories[0]?.name || "Electrical Switches",
     brand: "",
     price: 0,
     mrp: 0,
@@ -3237,7 +3236,7 @@ function ProductForm({
               value={form.category}
               onChange={(e) => update("category", e.target.value)}
             >
-              {categories.map((c) => (
+              {categories.filter(c => c.status !== "ARCHIVED" && c.active !== false).map((c) => (
                 <option key={c.id}>{c.name}</option>
               ))}
             </select>
