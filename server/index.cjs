@@ -405,7 +405,7 @@ const buildCustomerOrderConfirmationMessage = (order) => {
   const itemsList = items.map((item) => {
     const productName = String(item.productName || item.name || 'Item').trim() || 'Item';
     const quantity = Number(item.quantity || 0);
-    return `* ${productName} — Qty: ${quantity}`;
+    return `- ${productName} — Qty: ${quantity}`;
   }).join('\n');
   const address = formatOrderAddress(safeJson(order.delivery_address_json, {}));
   return [
@@ -418,14 +418,12 @@ const buildCustomerOrderConfirmationMessage = (order) => {
     `Order Total: ${total}`,
     '',
     'Items:',
-    itemsList || '* Items not available',
+    itemsList || '- Items not available',
     '',
     'Delivery Address:',
     address || 'Address not provided',
     '',
-    'Your order is now confirmed.',
-    '',
-    'Thank you for choosing Murugesan Electrical and Hardwares.',
+    'Thank you for shopping with us.',
   ].join('\n');
 };
 const buildOrderNotificationMessage = (order, status) => {
@@ -452,33 +450,26 @@ const buildOwnerOrderNotificationMessage = (order) => {
     const name = String(item.productName || item.name || 'Item').trim() || 'Item';
     const quantity = Number(item.quantity || 0);
     const price = formatCurrency(item.unitPrice ?? item.price ?? 0);
-    return `* ${name} — Qty: ${quantity} — Price: ${price}`;
+    return `- ${name}, Qty: ${quantity}, Price: ${price}`;
   }).join('\n');
   const gst = String(order.gst_number || '').trim();
   return [
-    'Hello Murugesan Electrical and Hardwares,',
+    'Hello Murugesan Electrical and Hardwares, I have placed an order.',
     '',
-    'I would like to place an order.',
-    '',
-    `Order ID: ${orderNumber}`,
-    '',
-    'Customer Details:',
-    `Name: ${customer}`,
+    `Order: ${orderNumber}`,
+    `Customer: ${customer}`,
     `Mobile: ${mobile}`,
-    ...(gst ? [`GST Number: ${gst}`] : []),
+    ...(gst ? [`GST: ${gst}`] : []),
     '',
-    'Delivery Address:',
+    'Delivery address:',
     address || 'Address not provided',
     '',
-    'Order Items:',
+    'Items:',
+    items || '- No items',
     '',
-    items || '* No items',
-    '',
-    `Total Amount: ${formatCurrency(order.total)}`,
+    `Total: ${formatCurrency(order.total)}`,
     '',
     'Please confirm my order.',
-    '',
-    'Thank you.',
   ].join('\n');
 };
 const whatsappRecipient = (value) => normalizeWhatsAppNumber(value);

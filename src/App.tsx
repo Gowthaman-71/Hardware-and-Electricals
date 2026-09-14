@@ -705,14 +705,23 @@ const buildWhatsAppUrl = (phoneNumber: unknown, message: unknown): string => {
   if (!normalized || !message) return "";
   return `https://wa.me/${normalized}?text=${encodeURIComponent(String(message))}`;
 };
-const openWhatsAppUrl = (url: string): void => {
+const openWhatsAppUrl = (url: string): boolean => {
+  if (!url) return false;
+
   try {
-    if (typeof window !== "undefined" && window.location && url) {
-      window.location.href = url;
-    }
+    const target = String(url).trim();
+    if (!target) return false;
+
+    // Use window.location.assign for same-tab navigation to avoid popup blockers
+    window.location.assign(target);
+    return true;
   } catch {
-    if (typeof window !== "undefined" && url) {
+    try {
+      // Fallback to window.open if assign fails
       window.open(url, "_blank", "noopener,noreferrer");
+      return true;
+    } catch {
+      return false;
     }
   }
 };
@@ -1791,8 +1800,12 @@ function Cart({
                   .join("\n\n")}`;
                 const url = buildWhatsAppUrl(businessWhatsappNumber, message);
                 if (url) {
-                  onNotify("Opening WhatsApp enquiry");
-                  openWhatsAppUrl(url);
+                  const opened = openWhatsAppUrl(url);
+                  if (!opened) {
+                    onNotify("WhatsApp could not be opened.");
+                  }
+                } else {
+                  onNotify("Unable to create WhatsApp message.");
                 }
               }}
             >
@@ -1842,7 +1855,9 @@ function Cart({
 function whatsapp(product: Product) {
   const message = `Hello Murugesan Electrical and Hardwares, I am interested in:\nProduct: ${product.name}\nCode: ${product.code}\nQuantity: 1\nPrice: ${money(product.price)}\n\nPlease confirm availability and final price.`;
   const url = buildWhatsAppUrl(businessWhatsappNumber, message);
-  if (url) openWhatsAppUrl(url);
+  if (url) {
+    openWhatsAppUrl(url);
+  }
 }
 function Login({
   onLogin,
@@ -2679,12 +2694,15 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
     );
     const whatsappUrl = String(raw.whatsappUrl || "").trim();
     if (raw.alreadyConfirmed) {
-      notify("Order already confirmed. Opening WhatsApp...");
+      notify("Order already confirmed.");
     } else {
-      notify("Order confirmed. Opening WhatsApp...");
+      notify("Order confirmed.");
     }
     if (whatsappUrl) {
-      openWhatsAppUrl(whatsappUrl);
+      const opened = openWhatsAppUrl(whatsappUrl);
+      if (!opened) {
+        notify("Order confirmed, but WhatsApp could not be opened.");
+      }
     } else {
       notify("Order confirmed, but WhatsApp URL is missing.");
     }
@@ -2705,8 +2723,10 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
       notify("Customer notification could not be prepared.");
       return;
     }
-    notify("Opening WhatsApp...");
-    openWhatsAppUrl(url);
+    const opened = openWhatsAppUrl(url);
+    if (!opened) {
+      notify("WhatsApp could not be opened.");
+    }
   };
   return (
     <section className="panel">
@@ -3444,7 +3464,8 @@ function CustomerCheckout({
       idempotencyKey.current = checkoutFingerprint;
     }
     setSubmitting(true);
-    let createdWhatsappUrl = "";
+    setMessage("");
+
     try {
       const response = await fetch("/api/me/orders", {
         method: "POST",
@@ -3465,28 +3486,35 @@ function CustomerCheckout({
           })),
         }),
       });
+      
       const rawResult = await response.json().catch(() => ({}));
+      
       if (!response.ok) {
         setMessage(rawResult.error || "Unable to place the order. Please try again.");
         return;
       }
-      createdWhatsappUrl = String(rawResult.whatsappUrl || "");
-    } catch {
+
+      const whatsappUrl = String(rawResult.whatsappUrl || "").trim();
+      
+      if (!whatsappUrl) {
+        setMessage("Order placed successfully, but WhatsApp could not be opened. Please contact the shop.");
+        onComplete(items.map(({ product }) => product.id));
+        return;
+      }
+
+      // Order created successfully, clear cart and open WhatsApp
+      onComplete(items.map(({ product }) => product.id));
+      setMessage("Opening WhatsApp...");
+      
+      const opened = openWhatsAppUrl(whatsappUrl);
+      if (!opened) {
+        setMessage("Order placed successfully, but WhatsApp could not be opened. Please contact the shop.");
+      }
+    } catch (error) {
       setMessage("Unable to place the order. Please try again.");
-      return;
     } finally {
       setSubmitting(false);
     }
-
-    if (!createdWhatsappUrl) {
-      setMessage("Order saved, but WhatsApp could not be opened. Please contact the shop.");
-      onComplete(items.map(({ product }) => product.id));
-      return;
-    }
-
-    setMessage("Opening WhatsApp...");
-    onComplete(items.map(({ product }) => product.id));
-    openWhatsAppUrl(createdWhatsappUrl);
   };
 
   return (
