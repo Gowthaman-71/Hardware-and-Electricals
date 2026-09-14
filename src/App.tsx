@@ -2676,35 +2676,40 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
     );
   };
   const confirmOrder = async (order: CustomerOrder) => {
-    const response = await fetch(`/api/orders/${order.id}/confirm`, {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiToken}`,
-      },
-    });
-    const raw = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      notify(raw.error || "Unable to confirm order");
-      return;
-    }
-    const confirmedOrder = (raw.order || order) as CustomerOrder;
-    setOrders((current) =>
-      current.map((item) => (item.id === confirmedOrder.id ? confirmedOrder : item)),
-    );
-    const whatsappUrl = String(raw.whatsappUrl || "").trim();
-    if (raw.alreadyConfirmed) {
-      notify("Order already confirmed.");
-    } else {
-      notify("Order confirmed.");
-    }
-    if (whatsappUrl) {
-      const opened = openWhatsAppUrl(whatsappUrl);
-      if (!opened) {
-        notify("Order confirmed, but WhatsApp could not be opened.");
+    try {
+      const response = await fetch(`/api/orders/${order.id}/confirm`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiToken}`,
+        },
+      });
+      const raw = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        notify(raw.error || "Unable to confirm order");
+        return;
       }
-    } else {
-      notify("Order confirmed, but WhatsApp URL is missing.");
+      const confirmedOrder = (raw.order || order) as CustomerOrder;
+      setOrders((current) =>
+        current.map((item) => (item.id === confirmedOrder.id ? confirmedOrder : item)),
+      );
+      const whatsappUrl = String(raw.whatsappUrl || "").trim();
+      if (raw.alreadyConfirmed) {
+        notify("Order already confirmed.");
+      } else {
+        notify("Order confirmed.");
+      }
+      if (whatsappUrl) {
+        const opened = openWhatsAppUrl(whatsappUrl);
+        if (!opened) {
+          notify("Order confirmed, but WhatsApp could not be opened.");
+        }
+      } else {
+        notify("Order confirmed, but WhatsApp URL is missing.");
+      }
+    } catch (error) {
+      console.error("Confirm order error:", error);
+      notify("Unable to confirm order. Please try again.");
     }
   };
   const notifyCustomer = async (order: CustomerOrder) => {
