@@ -44,11 +44,11 @@ CREATE TABLE IF NOT EXISTS orders (
   subtotal REAL NOT NULL DEFAULT 0,
   delivery_charge REAL NOT NULL DEFAULT 0,
   total REAL NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CONFIRMED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED')),
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CONFIRMED', 'REJECTED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED')),
   payment_method TEXT NOT NULL DEFAULT 'Cash on Delivery',
   payment_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (payment_status IN ('PENDING', 'PAID', 'FAILED', 'REFUNDED')),
   delivery_address_json TEXT NOT NULL,
-  notification_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (notification_status IN ('PENDING', 'SENT', 'FAILED')),
+  notification_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (notification_status IN ('PENDING', 'PREPARED', 'SENT', 'FAILED')),
   notification_sent_at TEXT,
   notification_message_id TEXT,
   created_at TEXT NOT NULL,
@@ -74,7 +74,7 @@ CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id, produc
 CREATE TABLE IF NOT EXISTS order_status_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-  status TEXT NOT NULL CHECK (status IN ('PENDING', 'CONFIRMED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED')),
+  status TEXT NOT NULL CHECK (status IN ('PENDING', 'CONFIRMED', 'REJECTED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED')),
   changed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   note TEXT NOT NULL DEFAULT ''

@@ -639,7 +639,7 @@ type CustomerOrder = {
   }[];
   createdAt: string;
   itemCount?: number;
-  notification?: { sent: boolean; error?: string | null } | null;
+  notification?: { sent?: boolean; prepared?: boolean; error?: string | null; whatsappUrl?: string | null } | null;
 };
 const orderStatusTimeline = [
   "PENDING",
@@ -651,8 +651,9 @@ const orderStatusTimeline = [
 const orderStatusIndex = (status: string) =>
   orderStatusTimeline.indexOf(status as (typeof orderStatusTimeline)[number]);
 const nextOrderStatuses: Record<string, string[]> = {
-  PENDING: ["CONFIRMED", "CANCELLED"],
+  PENDING: ["CONFIRMED", "REJECTED", "CANCELLED"],
   CONFIRMED: ["PROCESSING", "CANCELLED"],
+  REJECTED: [],
   PROCESSING: ["OUT_FOR_DELIVERY", "CANCELLED"],
   OUT_FOR_DELIVERY: ["DELIVERED"],
   DELIVERED: [],
@@ -663,6 +664,7 @@ const formatOrderStatus = (status: string) => {
   const map: Record<string, string> = {
     PENDING: "Pending",
     CONFIRMED: "Confirmed",
+    REJECTED: "Rejected",
     PROCESSING: "Processing",
     OUT_FOR_DELIVERY: "Out for Delivery",
     DELIVERED: "Delivered",
@@ -678,12 +680,48 @@ const orderAddressText = (value: Address | Record<string, unknown>) => {
   const pincode = String(address.pincode || "").trim();
   return pincode ? `${parts.join(", ")}${parts.length ? " - " : ""}${pincode}` : parts.join(", ");
 };
+const normalizeWhatsAppNumber = (value: unknown): string => {
+  if (!value) return "";
+  let digits = String(value).replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.startsWith("00")) digits = digits.slice(2);
+  if (digits.length === 10 && /^[6-9]/.test(digits)) return `91${digits}`;
+  if (digits.length === 11 && digits.startsWith("0")) return `91${digits.slice(1)}`;
+  if (digits.length === 12 && digits.startsWith("91")) return digits;
+  if (digits.length > 12) return digits.slice(-12);
+  if (digits.length >= 10) return `91${digits.slice(-10)}`;
+  return digits;
+};
+const isValidWhatsAppNumber = (value: unknown): boolean => {
+  const normalized = normalizeWhatsAppNumber(value);
+  if (!normalized) return false;
+  const digitsOnly = normalized.replace(/\D/g, "");
+  if (digitsOnly.length < 12) return false;
+  const localPart = digitsOnly.length === 12 ? digitsOnly.slice(2) : digitsOnly.slice(-10);
+  return /^[6-9]/.test(localPart);
+};
+const buildWhatsAppUrl = (phoneNumber: unknown, message: unknown): string => {
+  const normalized = normalizeWhatsAppNumber(phoneNumber);
+  if (!normalized || !message) return "";
+  return `https://wa.me/${normalized}?text=${encodeURIComponent(String(message))}`;
+};
+const openWhatsAppUrl = (url: string): void => {
+  try {
+    if (typeof window !== "undefined" && window.location && url) {
+      window.location.href = url;
+    }
+  } catch {
+    if (typeof window !== "undefined" && url) {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  }
+};
 const logoPath = "/assets/logo/murugesan-logo.png";
 const fallbackImage =
   "https://images.unsplash.com/photo-1621905252507-b35492cc74b4?auto=format&fit=crop&w=900&q=80";
-const businessWhatsappNumber = String(
-  import.meta.env.VITE_BUSINESS_WHATSAPP_NUMBER || "+919361866771",
-).replace(/\D/g, "");
+const businessWhatsappNumber = normalizeWhatsAppNumber(
+  import.meta.env.VITE_BUSINESS_WHATSAPP_NUMBER || import.meta.env.BUSINESS_WHATSAPP_NUMBER || "919361866771",
+);
 const image = (id: string) =>
   `https://images.unsplash.com/${id}?auto=format&fit=crop&w=900&q=82`;
 const money = (value: number) => `₹${value.toLocaleString("en-IN")}`;
@@ -1745,11 +1783,17 @@ function Cart({
             <button
               className="button blue"
               onClick={() => {
-                window.open(
-                  `https://wa.me/${businessWhatsappNumber}?text=${encodeURIComponent(`Hello Murugesan Electrical and Hardwares, I am interested in:\n${items.map(({ product, quantity }) => `Product: ${product.name}\nCode: ${product.code}\nQuantity: ${quantity}\nPrice: ${money(product.price)}`).join("\n\n")}`)}`,
-                  "_blank",
-                );
-                onNotify("Opening WhatsApp enquiry");
+                const message = `Hello Murugesan Electrical and Hardwares, I am interested in:\n${items
+                  .map(
+                    ({ product, quantity }) =>
+                      `Product: ${product.name}\nCode: ${product.code}\nQuantity: ${quantity}\nPrice: ${money(product.price)}`,
+                  )
+                  .join("\n\n")}`;
+                const url = buildWhatsAppUrl(businessWhatsappNumber, message);
+                if (url) {
+                  onNotify("Opening WhatsApp enquiry");
+                  openWhatsAppUrl(url);
+                }
               }}
             >
               Send enquiry on WhatsApp ↗
@@ -1796,10 +1840,9 @@ function Cart({
   );
 }
 function whatsapp(product: Product) {
-  window.open(
-    `https://wa.me/${businessWhatsappNumber}?text=${encodeURIComponent(`Hello Murugesan Electrical and Hardwares, I am interested in:\nProduct: ${product.name}\nCode: ${product.code}\nQuantity: 1\nPrice: ${money(product.price)}\n\nPlease confirm availability and final price.`)}`,
-    "_blank",
-  );
+  const message = `Hello Murugesan Electrical and Hardwares, I am interested in:\nProduct: ${product.name}\nCode: ${product.code}\nQuantity: 1\nPrice: ${money(product.price)}\n\nPlease confirm availability and final price.`;
+  const url = buildWhatsAppUrl(businessWhatsappNumber, message);
+  if (url) openWhatsAppUrl(url);
 }
 function Login({
   onLogin,
@@ -2605,11 +2648,46 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
     setOrders((current) =>
       current.map((order) => (order.id === updated.id ? updated : order)),
     );
+    const notificationUrl = updated.notification?.whatsappUrl;
+    if (nextStatus === "CONFIRMED" && notificationUrl) {
+      notify("Order confirmed. Opening WhatsApp...");
+      openWhatsAppUrl(notificationUrl);
+      return;
+    }
     notify(
       updated.notification?.error
         ? `Order status updated, but WhatsApp failed: ${updated.notification.error}`
         : "Order status updated",
     );
+  };
+  const confirmOrder = async (order: CustomerOrder) => {
+    const response = await fetch(`/api/orders/${order.id}/confirm`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiToken}`,
+      },
+    });
+    const raw = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      notify(raw.error || "Unable to confirm order");
+      return;
+    }
+    const confirmedOrder = (raw.order || order) as CustomerOrder;
+    setOrders((current) =>
+      current.map((item) => (item.id === confirmedOrder.id ? confirmedOrder : item)),
+    );
+    const whatsappUrl = String(raw.whatsappUrl || "").trim();
+    if (raw.alreadyConfirmed) {
+      notify("Order already confirmed. Opening WhatsApp...");
+    } else {
+      notify("Order confirmed. Opening WhatsApp...");
+    }
+    if (whatsappUrl) {
+      openWhatsAppUrl(whatsappUrl);
+    } else {
+      notify("Order confirmed, but WhatsApp URL is missing.");
+    }
   };
   const notifyCustomer = async (order: CustomerOrder) => {
     const response = await fetch(`/api/orders/${order.id}/notify`, {
@@ -2621,9 +2699,14 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
       notify(result.error || "Customer notification could not be prepared.");
       return;
     }
-    const result = (await response.json()) as { url: string };
-    window.open(result.url, "_blank");
-    notify("WhatsApp notification prepared");
+    const result = (await response.json()) as { whatsappUrl?: string; url?: string };
+    const url = result.whatsappUrl || result.url || "";
+    if (!url) {
+      notify("Customer notification could not be prepared.");
+      return;
+    }
+    notify("Opening WhatsApp...");
+    openWhatsAppUrl(url);
   };
   return (
     <section className="panel">
@@ -2647,6 +2730,7 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
           {[
             "PENDING",
             "CONFIRMED",
+            "REJECTED",
             "PROCESSING",
             "OUT_FOR_DELIVERY",
             "DELIVERED",
@@ -2686,21 +2770,46 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
               <button className="plain-button" type="button" onClick={() => setExpandedId(expandedId === order.id ? null : order.id)}>
                 {expandedId === order.id ? "Hide details" : "View details"}
               </button>
-              {(nextOrderStatuses[order.status] || []).map((status) => (
+              {order.status === "PENDING" && (
+                <>
+                  <button
+                    className="button blue"
+                    type="button"
+                    onClick={() => void confirmOrder(order)}
+                  >
+                    Confirm Order
+                  </button>
+                  {nextOrderStatuses[order.status]?.includes("REJECTED") && (
+                    <button
+                      className="plain-button"
+                      type="button"
+                      onClick={() => {
+                        if (window.confirm(`Reject order ${order.orderNumber}?`)) {
+                          void updateStatus(order.id, "REJECTED");
+                        }
+                      }}
+                    >
+                      Reject Order
+                    </button>
+                  )}
+                </>
+              )}
+              {(nextOrderStatuses[order.status] || []).filter((s) => s !== "CONFIRMED" && s !== "REJECTED").map((status) => (
                 <button
                   className="plain-button"
                   type="button"
                   key={status}
-                  onClick={() => void updateStatus(order.id, status)}
+                  onClick={() => {
+                    if (status === "CANCELLED" && !window.confirm(`Cancel order ${order.orderNumber}?`)) return;
+                    void updateStatus(order.id, status);
+                  }}
                 >
                   {status === "CANCELLED" ? "Cancel Order" : `Mark ${formatOrderStatus(status)}`}
                 </button>
               ))}
-              {order.status !== "PENDING" && order.status !== "DELIVERED" && order.status !== "CANCELLED" && (
-                <button className="plain-button" type="button" onClick={() => void notifyCustomer(order)}>
-                  Notify Customer on WhatsApp
-                </button>
-              )}
+              <button className="plain-button" type="button" onClick={() => void notifyCustomer(order)}>
+                Notify Customer on WhatsApp
+              </button>
             </div>
             {expandedId === order.id && (
               <div style={{ marginTop: 16 }}>
@@ -3318,6 +3427,11 @@ function CustomerCheckout({
       setMessage("Please select a delivery address");
       return;
     }
+    const customerMobileRaw = String(customer?.mobile || address.phone || "").trim();
+    if (!customerMobileRaw || !isValidWhatsAppNumber(customerMobileRaw)) {
+      setMessage("Please enter a valid WhatsApp-enabled mobile number.");
+      return;
+    }
     const normalizedGst = (gstNumber || address.gstNumber || "").trim().toUpperCase().replace(/\s+/g, "");
     if (normalizedGst && !/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z0-9]{1}[A-Z0-9]{1}Z[A-Z0-9]{1}$/.test(normalizedGst)) {
       setMessage("Please enter a valid GST number.");
@@ -3330,7 +3444,7 @@ function CustomerCheckout({
       idempotencyKey.current = checkoutFingerprint;
     }
     setSubmitting(true);
-    let order: CustomerOrder;
+    let createdWhatsappUrl = "";
     try {
       const response = await fetch("/api/me/orders", {
         method: "POST",
@@ -3341,6 +3455,7 @@ function CustomerCheckout({
         body: JSON.stringify({
           addressId: selected,
           gstNumber: normalizedGst || undefined,
+          customerMobile: customerMobileRaw,
           idempotencyKey: idempotencyKey.current,
           items: items.map(({ product, quantity }) => ({
             productId: product.id,
@@ -3350,12 +3465,12 @@ function CustomerCheckout({
           })),
         }),
       });
+      const rawResult = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const result = await response.json().catch(() => ({}));
-        setMessage(result.error || "Unable to place the order. Please try again.");
+        setMessage(rawResult.error || "Unable to place the order. Please try again.");
         return;
       }
-      order = (await response.json()) as CustomerOrder;
+      createdWhatsappUrl = String(rawResult.whatsappUrl || "");
     } catch {
       setMessage("Unable to place the order. Please try again.");
       return;
@@ -3363,43 +3478,15 @@ function CustomerCheckout({
       setSubmitting(false);
     }
 
-    const customerName = String(customer?.name || address.fullName || "Customer").trim();
-    const rawMobile = String(customer?.mobile || address.phone || "").replace(/\D/g, "");
-    const mobile = rawMobile.length === 10 ? `+91${rawMobile}` : rawMobile.length > 0 ? `+${rawMobile.replace(/^\+/, "")}` : "Not provided";
-    const addressParts = [
-      address.addressLine1,
-      address.area,
-      address.city,
-      address.state,
-    ].filter((part) => typeof part === "string" && part.trim().length > 0);
-    const addressText = addressParts.join(", ");
-    const pincodeText = String(address.pincode || "").trim();
-    const deliveryAddress = pincodeText ? `${addressText}${addressText ? " - " : ""}${pincodeText}` : addressText || "Not provided";
-    const gstValue = normalizedGst || "";
-    const gstLine = gstValue ? `GST Number: ${gstValue}` : "";
+    if (!createdWhatsappUrl) {
+      setMessage("Order saved, but WhatsApp could not be opened. Please contact the shop.");
+      onComplete(items.map(({ product }) => product.id));
+      return;
+    }
 
-    const orderMessage = [
-      "Hello Murugesan Electrical and Hardwares, I have placed an order.",
-      `Order: ${order.orderNumber}`,
-      `Customer: ${customerName}`,
-      `Mobile: ${mobile}`,
-      `Delivery address: ${deliveryAddress}`,
-      ...(gstLine ? [gstLine] : []),
-      "",
-      "Items:",
-      ...items.map(({ product, quantity }) => {
-        const unitSuffix = product.unit && String(product.unit).trim() ? `, Unit: ${product.unit}` : "";
-        return `- ${product.name}, Qty: ${quantity}${unitSuffix}, Price: ${money(product.price)}`;
-      }),
-      `Total: ${money(order.total)}`,
-    ].join("\n");
-
+    setMessage("Opening WhatsApp...");
     onComplete(items.map(({ product }) => product.id));
-    window.open(
-      `https://wa.me/${businessWhatsappNumber}?text=${encodeURIComponent(orderMessage)}`,
-      "_blank",
-    );
-    setMessage("Order placed successfully");
+    openWhatsAppUrl(createdWhatsappUrl);
   };
 
   return (
@@ -3446,7 +3533,7 @@ function CustomerCheckout({
             onClick={() => void placeOrder()}
             disabled={!items.length || submitting}
           >
-            {submitting ? "Placing order..." : "Place order"}
+            {submitting ? "PLACING ORDER..." : "PLACE ORDER"}
           </button>
         </>
       ) : (

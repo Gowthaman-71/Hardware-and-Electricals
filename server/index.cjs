@@ -229,7 +229,7 @@ const runProductionSchemaSetup = () => {
     `CREATE TABLE IF NOT EXISTS order_status_history (
       id SERIAL PRIMARY KEY,
       order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-      status TEXT NOT NULL CHECK (status IN ('PENDING', 'CONFIRMED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED')),
+      status TEXT NOT NULL CHECK (status IN ('PENDING', 'CONFIRMED', 'REJECTED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED')),
       changed_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       note TEXT NOT NULL DEFAULT ''
@@ -314,25 +314,44 @@ const normalizePhoneNumber = (value) => {
   return digits.replace(/^0+/, '').slice(-10);
 };
 const normalizeMobile = normalizePhoneNumber;
-const normalizeWhatsappNumber = (value) => {
-  const digits = String(value || '').replace(/\D/g, '');
+const ownerWhatsappNumberRaw = String(process.env.OWNER_WHATSAPP_NUMBER || process.env.WHATSAPP_OWNER_NUMBER || '919361866771').trim();
+const normalizeWhatsAppNumber = (value) => {
+  if (!value) return '';
+  let digits = String(value).replace(/\D/g, '');
   if (!digits) return '';
-  if (digits.length === 10) return `+91${digits}`;
-  if (digits.length === 11 && digits.startsWith('0')) return `+91${digits.slice(1)}`;
-  if (digits.length === 12 && digits.startsWith('91')) return `+${digits}`;
-  if (digits.startsWith('+')) return digits;
-  return `+${digits}`;
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (digits.length === 10 && /^[6-9]/.test(digits)) return `91${digits}`;
+  if (digits.length === 11 && digits.startsWith('0')) return `91${digits.slice(1)}`;
+  if (digits.length === 12 && digits.startsWith('91')) return digits;
+  if (digits.length > 12) return digits.slice(-12);
+  if (digits.length >= 10) return `91${digits.slice(-10)}`;
+  return digits;
 };
+const isValidWhatsAppNumber = (value) => {
+  const normalized = normalizeWhatsAppNumber(value);
+  if (!normalized) return false;
+  const digitsOnly = normalized.replace(/\D/g, '');
+  if (digitsOnly.length < 12) return false;
+  const localPart = digitsOnly.length === 12 ? digitsOnly.slice(2) : digitsOnly.slice(-10);
+  return /^[6-9]/.test(localPart);
+};
+const buildWhatsAppUrl = (phoneNumber, message) => {
+  const normalized = normalizeWhatsAppNumber(phoneNumber);
+  if (!normalized || !message) return '';
+  return `https://wa.me/${normalized}?text=${encodeURIComponent(String(message))}`;
+};
+const normalizeWhatsappNumber = normalizeWhatsAppNumber;
 const slugify = (value) => value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 const safeJson = (value, fallback) => { try { return JSON.parse(value); } catch { return fallback; } };
 const normalizeStockValue = (value) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) && Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
 };
-const validOrderStatuses = new Set(['PENDING', 'CONFIRMED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED']);
+const validOrderStatuses = new Set(['PENDING', 'CONFIRMED', 'REJECTED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED']);
 const allowedOrderTransitions = {
-  PENDING: new Set(['CONFIRMED', 'CANCELLED']),
+  PENDING: new Set(['CONFIRMED', 'REJECTED', 'CANCELLED']),
   CONFIRMED: new Set(['PROCESSING', 'CANCELLED']),
+  REJECTED: new Set(),
   PROCESSING: new Set(['OUT_FOR_DELIVERY', 'CANCELLED']),
   OUT_FOR_DELIVERY: new Set(['DELIVERED']),
   DELIVERED: new Set(),
@@ -341,6 +360,7 @@ const allowedOrderTransitions = {
 const notificationTypeForStatus = {
   PENDING: 'NEW_ORDER_OWNER',
   CONFIRMED: 'ORDER_CONFIRMED_CUSTOMER',
+  REJECTED: 'ORDER_REJECTED',
   PROCESSING: 'ORDER_PROCESSING',
   OUT_FOR_DELIVERY: 'ORDER_OUT_FOR_DELIVERY',
   DELIVERED: 'ORDER_DELIVERED',
@@ -348,13 +368,14 @@ const notificationTypeForStatus = {
 };
 const normalizeOrderStatus = (value) => {
   const normalized = String(value || 'PENDING').trim().toUpperCase().replace(/\s+/g, '_');
-  const allowed = new Set(['PENDING', 'CONFIRMED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED']);
+  const allowed = new Set(['PENDING', 'CONFIRMED', 'REJECTED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED']);
   return allowed.has(normalized) ? normalized : null;
 };
 const formatOrderStatusLabel = (value) => {
   const labelMap = {
     PENDING: 'Pending',
     CONFIRMED: 'Confirmed',
+    REJECTED: 'Rejected',
     PROCESSING: 'Processing',
     OUT_FOR_DELIVERY: 'Out for Delivery',
     DELIVERED: 'Delivered',
@@ -362,17 +383,11 @@ const formatOrderStatusLabel = (value) => {
   };
   return labelMap[normalizeOrderStatus(value) || 'PENDING'] || 'Pending';
 };
+const ownerWhatsappNumber = normalizeWhatsAppNumber(ownerWhatsappNumberRaw);
 const whatsappConfig = {
-  accessToken: String(process.env.WHATSAPP_ACCESS_TOKEN || '').trim(),
-  phoneNumberId: String(process.env.WHATSAPP_PHONE_NUMBER_ID || '').trim(),
-  businessAccountId: String(process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || '').trim(),
-  apiVersion: String(process.env.WHATSAPP_API_VERSION || 'v23.0').trim(),
-  ownerNumber: normalizeWhatsappNumber(process.env.WHATSAPP_OWNER_NUMBER || ''),
-  newOrderTemplate: String(process.env.WHATSAPP_NEW_ORDER_TEMPLATE || '').trim(),
-  confirmedTemplate: String(process.env.WHATSAPP_ORDER_CONFIRMED_TEMPLATE || '').trim(),
-  language: String(process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'en_US').trim(),
+  ownerNumber: ownerWhatsappNumber,
 };
-const businessWhatsappNumber = whatsappConfig.ownerNumber;
+const businessWhatsappNumber = ownerWhatsappNumber;
 const formatCurrency = (value) => `₹${Number(value || 0).toLocaleString('en-IN')}`;
 const formatOrderAddress = (value) => {
   const address = value && typeof value === 'object' ? value : {};
@@ -382,15 +397,47 @@ const formatOrderAddress = (value) => {
   const pincode = String(address.pincode || '').trim();
   return pincode ? `${parts.join(', ')}${parts.length ? ' - ' : ''}${pincode}` : parts.join(', ');
 };
+const buildCustomerOrderConfirmationMessage = (order) => {
+  const name = String(order.customer_name || 'Customer').trim() || 'Customer';
+  const orderNumber = String(order.order_number || '').trim();
+  const total = formatCurrency(order.total);
+  const items = safeJson(order.items_json, []);
+  const itemsList = items.map((item) => {
+    const productName = String(item.productName || item.name || 'Item').trim() || 'Item';
+    const quantity = Number(item.quantity || 0);
+    return `* ${productName} — Qty: ${quantity}`;
+  }).join('\n');
+  const address = formatOrderAddress(safeJson(order.delivery_address_json, {}));
+  return [
+    `Hello ${name},`,
+    '',
+    'Your order has been confirmed by Murugesan Electrical and Hardwares.',
+    '',
+    `Order ID: ${orderNumber}`,
+    '',
+    `Order Total: ${total}`,
+    '',
+    'Items:',
+    itemsList || '* Items not available',
+    '',
+    'Delivery Address:',
+    address || 'Address not provided',
+    '',
+    'Your order is now confirmed.',
+    '',
+    'Thank you for choosing Murugesan Electrical and Hardwares.',
+  ].join('\n');
+};
 const buildOrderNotificationMessage = (order, status) => {
+  if (status === 'CONFIRMED') return buildCustomerOrderConfirmationMessage(order);
   const name = String(order.customer_name || 'Customer').trim() || 'Customer';
   const orderNumber = String(order.order_number || '').trim();
   const total = formatCurrency(order.total);
   const messages = {
-    CONFIRMED: `Hello ${name},\n\nYour order ${orderNumber} has been confirmed by Murugesan Electrical and Hardwares.\n\nOrder Total: ${total}\n\nStatus: CONFIRMED\n\nThank you.`,
-    PROCESSING: `Hello ${name},\n\nYour order ${orderNumber} is now being processed.\n\nStatus: PROCESSING`,
-    OUT_FOR_DELIVERY: `Hello ${name},\n\nYour order ${orderNumber} is out for delivery.\n\nStatus: OUT_FOR_DELIVERY`,
-    DELIVERED: `Hello ${name},\n\nYour order ${orderNumber} has been delivered successfully.\n\nStatus: DELIVERED`,
+    PROCESSING: `Hello ${name},\n\nYour order ${orderNumber} is now being processed.\n\nOrder Total: ${total}\n\nStatus: PROCESSING\n\nThank you for choosing Murugesan Electrical and Hardwares.`,
+    OUT_FOR_DELIVERY: `Hello ${name},\n\nYour order ${orderNumber} is out for delivery.\n\nOrder Total: ${total}\n\nStatus: OUT_FOR_DELIVERY\n\nThank you for choosing Murugesan Electrical and Hardwares.`,
+    DELIVERED: `Hello ${name},\n\nYour order ${orderNumber} has been delivered successfully.\n\nOrder Total: ${total}\n\nThank you for choosing Murugesan Electrical and Hardwares.`,
+    REJECTED: `Hello ${name},\n\nYour order ${orderNumber} has been rejected.\n\nPlease contact Murugesan Electrical and Hardwares if you need assistance.`,
     CANCELLED: `Hello ${name},\n\nYour order ${orderNumber} has been cancelled.\n\nPlease contact Murugesan Electrical and Hardwares if you need assistance.`,
   };
   return messages[status] || '';
@@ -398,89 +445,58 @@ const buildOrderNotificationMessage = (order, status) => {
 const buildOwnerOrderNotificationMessage = (order) => {
   const customer = String(order.customer_name || 'Customer').trim() || 'Customer';
   const rawMobile = String(order.customer_phone || '').trim();
-  const mobile = normalizeWhatsappNumber(rawMobile) || rawMobile;
+  const mobile = normalizePhoneNumber(rawMobile) || rawMobile;
+  const orderNumber = String(order.order_number || '').trim();
   const address = formatOrderAddress(safeJson(order.delivery_address_json, {}));
   const items = safeJson(order.items_json, []).map((item) => {
     const name = String(item.productName || item.name || 'Item').trim() || 'Item';
     const quantity = Number(item.quantity || 0);
-    const unit = String(item.unit || '').trim();
     const price = formatCurrency(item.unitPrice ?? item.price ?? 0);
-    return `- ${name}, Qty: ${quantity}${unit ? `, Unit: ${unit}` : ''}, Price: ${price}`;
+    return `* ${name} — Qty: ${quantity} — Price: ${price}`;
   }).join('\n');
   const gst = String(order.gst_number || '').trim();
   return [
     'Hello Murugesan Electrical and Hardwares,',
     '',
-    'I have placed an order.',
+    'I would like to place an order.',
     '',
-    `Order: ${String(order.order_number || '').trim()}`,
-    `Customer: ${customer}`,
+    `Order ID: ${orderNumber}`,
+    '',
+    'Customer Details:',
+    `Name: ${customer}`,
     `Mobile: ${mobile}`,
-    address ? `Delivery address: ${address}` : '',
-    items ? `Items:\n${items}` : '',
-    `Total: ${formatCurrency(order.total)}`,
-    gst ? `GST Number: ${gst}` : '',
-  ].filter(Boolean).join('\n');
+    ...(gst ? [`GST Number: ${gst}`] : []),
+    '',
+    'Delivery Address:',
+    address || 'Address not provided',
+    '',
+    'Order Items:',
+    '',
+    items || '* No items',
+    '',
+    `Total Amount: ${formatCurrency(order.total)}`,
+    '',
+    'Please confirm my order.',
+    '',
+    'Thank you.',
+  ].join('\n');
 };
-const whatsappRecipient = (value) => normalizeWhatsappNumber(value).replace(/\D/g, '');
-const orderTemplateParameters = (order, status) => [
-  String(order.customer_name || 'Customer').trim() || 'Customer',
-  String(order.order_number || '').trim(),
-  formatCurrency(order.total),
-  status,
-];
-async function sendWhatsAppTemplateNotification({ order, type, recipient, templateName, status }) {
+const whatsappRecipient = (value) => normalizeWhatsAppNumber(value);
+async function createOrderNotification({ order, type, recipient, status }) {
   const destination = whatsappRecipient(recipient);
-  const existing = destination
-    ? db.prepare('SELECT * FROM order_notifications WHERE order_id = ? AND type = ? AND recipient = ? AND status = ? ORDER BY id DESC LIMIT 1').get(order.id, type, destination, 'SENT')
-    : null;
-  if (existing) return { sent: true, duplicate: true, providerMessageId: existing.provider_message_id, notificationId: Number(existing.id) };
-
   const timestamp = now();
   const message = type === 'NEW_ORDER_OWNER'
     ? buildOwnerOrderNotificationMessage(order)
     : (buildOrderNotificationMessage(order, status) || `${type} ${order.order_number || ''}`.trim());
   const insert = db.prepare('INSERT INTO order_notifications (order_id,customer_id,type,channel,message,recipient,status,created_at) VALUES (?,?,?,?,?,?,?,?)');
   if (!destination) {
-    const result = insert.run(order.id, order.customer_id, type, 'WHATSAPP', message, '', 'FAILED', timestamp);
+    const result = insert.run(order.id, order.customer_id, type, 'WHATSAPP', message, '', 'PENDING', timestamp);
     db.prepare('UPDATE order_notifications SET error_message = ? WHERE id = ?').run('WhatsApp recipient is missing', result.lastInsertRowid);
-    return { sent: false, error: 'WhatsApp recipient is missing', notificationId: Number(result.lastInsertRowid) };
+    return { notificationId: Number(result.lastInsertRowid), whatsappUrl: '', destination: '' };
   }
-  if (!whatsappConfig.accessToken || !whatsappConfig.phoneNumberId || !templateName) {
-    const result = insert.run(order.id, order.customer_id, type, 'WHATSAPP', message, destination, 'FAILED', timestamp);
-    db.prepare('UPDATE order_notifications SET error_message = ? WHERE id = ?').run('WhatsApp Cloud API is not configured', result.lastInsertRowid);
-    console.warn('[whatsapp] not configured', { orderId: order.id, type, recipient: destination });
-    return { sent: false, error: 'WhatsApp Cloud API is not configured', notificationId: Number(result.lastInsertRowid) };
-  }
-
-  const result = insert.run(order.id, order.customer_id, type, 'WHATSAPP', message, destination, 'PENDING', timestamp);
-  const notificationId = Number(result.lastInsertRowid);
-  try {
-    const response = await fetch(`https://graph.facebook.com/${whatsappConfig.apiVersion}/${whatsappConfig.phoneNumberId}/messages`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${whatsappConfig.accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        to: destination,
-        type: 'template',
-        template: {
-          name: templateName,
-          language: { code: whatsappConfig.language },
-          components: [{ type: 'body', parameters: orderTemplateParameters(order, status).map((text) => ({ type: 'text', text })) }],
-        },
-      }),
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload?.error?.message || `WhatsApp API returned ${response.status}`);
-    const providerMessageId = payload?.messages?.[0]?.id || null;
-    db.prepare('UPDATE order_notifications SET status = ?, provider_message_id = ?, error_message = NULL WHERE id = ?').run('SENT', providerMessageId, notificationId);
-    return { sent: true, providerMessageId, notificationId };
-  } catch (error) {
-    const errorMessage = String(error?.message || 'WhatsApp API request failed').slice(0, 1000);
-    db.prepare('UPDATE order_notifications SET status = ?, error_message = ? WHERE id = ?').run('FAILED', errorMessage, notificationId);
-    console.error('[whatsapp] send failed', { orderId: order.id, type, recipient: destination, error: errorMessage });
-    return { sent: false, error: errorMessage, notificationId };
-  }
+  const whatsappUrl = buildWhatsAppUrl(destination, message);
+  const result = insert.run(order.id, order.customer_id, type, 'WHATSAPP', message, destination, 'PREPARED', timestamp);
+  return { notificationId: Number(result.lastInsertRowid), whatsappUrl, destination };
 }
 
 const productSelect = `
@@ -918,15 +934,15 @@ app.patch('/api/admin/orders/:id/status', auth, admin, async (req, res) => {
     const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
     let notification = null;
     if (requestedStatus === 'CONFIRMED') {
-      notification = await sendWhatsAppTemplateNotification({
+      const customerRecipient = updatedOrder.customer_phone;
+      notification = await createOrderNotification({
         order: updatedOrder,
         type: 'ORDER_CONFIRMED_CUSTOMER',
-        recipient: updatedOrder.customer_phone,
-        templateName: whatsappConfig.confirmedTemplate,
+        recipient: customerRecipient,
         status: requestedStatus,
       });
     }
-    res.json({ ...mapOrder(updatedOrder), notification: notification ? { sent: notification.sent, error: notification.error || null } : null });
+    res.json({ ...mapOrder(updatedOrder), notification: notification ? { whatsappUrl: notification.whatsappUrl || null, prepared: true } : null });
   } catch (error) {
     try { db.exec('ROLLBACK'); } catch { /* transaction already closed */ }
     console.error('[api/admin/orders/:id/status]', error && error.stack ? error.stack : error);
@@ -949,15 +965,63 @@ app.post('/api/orders/:id/notify', auth, admin, async (req, res) => {
   if (!notificationType) return res.status(400).json({ error: 'WhatsApp notification is not available for this order status' });
   const user = db.prepare('SELECT mobile_number FROM users WHERE id = ? AND role = ?').get(order.customer_id, 'CUSTOMER');
   const ownerNotification = notificationType === 'NEW_ORDER_OWNER';
-  const result = await sendWhatsAppTemplateNotification({
+  const result = await createOrderNotification({
     order,
     type: notificationType,
-    recipient: ownerNotification ? whatsappConfig.ownerNumber : (user?.mobile_number || order.customer_phone),
-    templateName: ownerNotification ? whatsappConfig.newOrderTemplate : whatsappConfig.confirmedTemplate,
+    recipient: ownerNotification ? ownerWhatsappNumber : (user?.mobile_number || order.customer_phone),
     status,
   });
-  if (!result.sent) return res.status(502).json({ error: result.error || 'WhatsApp notification failed', notificationId: result.notificationId });
-  res.json({ notificationId: result.notificationId, channel: 'WHATSAPP', providerMessageId: result.providerMessageId, sent: true });
+  if (!result.whatsappUrl) return res.status(502).json({ error: 'Invalid recipient WhatsApp number.', notificationId: result.notificationId });
+  res.json({ notificationId: result.notificationId, channel: 'WHATSAPP', whatsappUrl: result.whatsappUrl, prepared: true });
+});
+app.patch('/api/orders/:orderId/confirm', auth, admin, async (req, res) => {
+  const orderId = Number(req.params.orderId);
+  if (!orderId) return res.status(400).json({ error: 'Order ID is required' });
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  const currentStatus = normalizeOrderStatus(order.status);
+  if (currentStatus === 'CONFIRMED') {
+    const customerRaw = String(order.customer_phone || '').trim();
+    const customerNormalized = normalizeWhatsAppNumber(customerRaw);
+    const customerValid = customerNormalized && isValidWhatsAppNumber(customerRaw);
+    const message = buildOrderNotificationMessage(order, 'CONFIRMED');
+    const whatsappUrl = customerValid && message ? buildWhatsAppUrl(customerNormalized, message) : '';
+    return res.status(200).json({ success: true, alreadyConfirmed: true, message: 'Order already confirmed.', order: mapOrder(order), customerMobile: customerNormalized || order.customer_phone, whatsappUrl });
+  }
+  if (currentStatus !== 'PENDING') {
+    return res.status(409).json({ error: `Cannot confirm order with status "${currentStatus}". Only PENDING orders can be confirmed.` });
+  }
+  const customerRaw = String(order.customer_phone || '').trim();
+  const customerNormalized = normalizeWhatsAppNumber(customerRaw);
+  if (!customerNormalized || !isValidWhatsAppNumber(customerRaw)) {
+    return res.status(400).json({ error: 'Please enter a valid WhatsApp-enabled mobile number for the customer.' });
+  }
+  const timestamp = now();
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.prepare('UPDATE orders SET status = ?, updated_at = ?, notification_status = ? WHERE id = ? AND status = ?').run('CONFIRMED', timestamp, 'PREPARED', orderId, 'PENDING');
+    db.prepare('INSERT INTO order_status_history (order_id,status,changed_by,created_at,note) VALUES (?,?,?,?,?)').run(orderId, 'CONFIRMED', req.user.id, timestamp, 'Owner confirmed order');
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* noop */ }
+    console.error('[api/orders/:orderId/confirm]', error && error.stack ? error.stack : error);
+    return res.status(500).json({ error: 'Unable to confirm order' });
+  }
+  const confirmedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  const confirmationResult = await createOrderNotification({
+    order: confirmedOrder,
+    type: 'ORDER_CONFIRMED_CUSTOMER',
+    recipient: customerRaw,
+    status: 'CONFIRMED',
+  });
+  res.json({
+    success: true,
+    alreadyConfirmed: false,
+    order: mapOrder(confirmedOrder),
+    customerMobile: customerNormalized,
+    whatsappUrl: confirmationResult.whatsappUrl || '',
+    notificationId: confirmationResult.notificationId || null,
+  });
 });
 app.get('/api/admin/customers', auth, admin, (_req, res) => {
   const rows = db.prepare(`
@@ -982,13 +1046,30 @@ app.get('/api/admin/customers', auth, admin, (_req, res) => {
   }));
   res.json(rows);
 });
-app.post('/api/me/orders', auth, async (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' }); const body = req.body || {}; const address = db.prepare('SELECT * FROM addresses WHERE id = ? AND customer_id = ?').get(Number(body.addressId), req.user.id); const user = db.prepare('SELECT id,name,email,mobile_number FROM users WHERE id = ?').get(req.user.id); if (!address || !user || !Array.isArray(body.items) || !body.items.length) return res.status(400).json({ error: 'A delivery address and cart items are required' }); const gstNumber = normalizeGstNumber(body.gstNumber ?? body.gst_number ?? address.gst_number ?? ''); if (gstNumber && !isValidGstNumber(gstNumber)) return res.status(400).json({ error: 'Please enter a valid GST number.' }); const normalizedItems = body.items.map((item) => ({ productId: Number(item.productId), name: String(item.name || '').trim(), quantity: Number(item.quantity), price: Number(item.price || 0) })); if (!normalizedItems.length || normalizedItems.some((item) => !item.productId || !item.name || !Number.isInteger(item.quantity) || item.quantity <= 0 || !Number.isFinite(item.price) || item.price < 0)) {
+const handleCreateCustomerOrder = async (req, res) => {
+  if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Customer access required' });
+  const body = req.body || {};
+  const address = db.prepare('SELECT * FROM addresses WHERE id = ? AND customer_id = ?').get(Number(body.addressId), req.user.id);
+  const user = db.prepare('SELECT id,name,email,mobile_number FROM users WHERE id = ?').get(req.user.id);
+  if (!address || !user || !Array.isArray(body.items) || !body.items.length) return res.status(400).json({ error: 'A delivery address and cart items are required' });
+  const customerMobileRaw = String(address.phone || user.mobile_number || body.customerMobile || '').trim();
+  if (!customerMobileRaw || !isValidWhatsAppNumber(customerMobileRaw)) {
+    return res.status(400).json({ error: 'Please enter a valid WhatsApp-enabled mobile number.' });
+  }
+  if (!ownerWhatsappNumber || !isValidWhatsAppNumber(ownerWhatsappNumber)) {
+    return res.status(500).json({ error: 'Owner WhatsApp number is not configured correctly.' });
+  }
+  const gstNumber = normalizeGstNumber(body.gstNumber ?? body.gst_number ?? address.gst_number ?? ''); if (gstNumber && !isValidGstNumber(gstNumber)) return res.status(400).json({ error: 'Please enter a valid GST number.' }); const normalizedItems = body.items.map((item) => ({ productId: Number(item.productId), name: String(item.name || '').trim(), quantity: Number(item.quantity), price: Number(item.price || 0) })); if (!normalizedItems.length || normalizedItems.some((item) => !item.productId || !item.name || !Number.isInteger(item.quantity) || item.quantity <= 0 || !Number.isFinite(item.price) || item.price < 0)) {
     return res.status(400).json({ error: 'Order items are invalid' });
   }
   const timestamp = now();
   const idempotencyKey = String(body.idempotencyKey || `${req.user.id}:${Date.now()}:${timestamp}`);
   const existing = db.prepare('SELECT * FROM orders WHERE idempotency_key = ?').get(idempotencyKey);
-  if (existing) return res.status(200).json(mapOrder(existing));
+  if (existing) {
+    const existingOwnerMsg = buildOwnerOrderNotificationMessage(existing);
+    const existingWhatsappUrl = buildWhatsAppUrl(ownerWhatsappNumber, existingOwnerMsg);
+    return res.status(200).json({ success: true, order: mapOrder(existing), whatsappUrl: existingWhatsappUrl });
+  }
 
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -1029,7 +1110,7 @@ app.post('/api/me/orders', auth, async (req, res) => { if (req.user.role !== 'CU
     const snapshot = { ...mapAddress(address), gstNumber: gstNumber || mapAddress(address).gstNumber || null };
     const orderNumber = `MH-${String(Date.now()).slice(-6)}`;
 
-    const result = db.prepare('INSERT INTO orders (order_number,customer_id,customer_name,customer_email,customer_phone,gst_number,items_json,subtotal,delivery_charge,total,status,payment_method,payment_status,delivery_address_json,idempotency_key,notification_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(orderNumber, req.user.id, user.name, user.email || `${user.mobile_number}@mobile.local`, address.phone, gstNumber || null, JSON.stringify(snapshotItems), subtotal, deliveryCharge, total, 'PENDING', 'Cash on Delivery', 'PENDING', JSON.stringify(snapshot), idempotencyKey, 'SENT', timestamp, timestamp);
+    const result = db.prepare('INSERT INTO orders (order_number,customer_id,customer_name,customer_email,customer_phone,gst_number,items_json,subtotal,delivery_charge,total,status,payment_method,payment_status,delivery_address_json,idempotency_key,notification_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(orderNumber, req.user.id, user.name, user.email || `${user.mobile_number}@mobile.local`, address.phone, gstNumber || null, JSON.stringify(snapshotItems), subtotal, deliveryCharge, total, 'PENDING', 'Cash on Delivery', 'PENDING', JSON.stringify(snapshot), idempotencyKey, 'PENDING', timestamp, timestamp);
     const orderId = Number(result.lastInsertRowid);
     const orderItemInsert = db.prepare('INSERT INTO order_items (order_id,product_id,product_name,product_image,quantity,unit_price,total_price,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)');
     for (const item of snapshotItems) {
@@ -1046,24 +1127,34 @@ app.post('/api/me/orders', auth, async (req, res) => { if (req.user.role !== 'CU
 
     db.exec('COMMIT');
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
-    const notification = await sendWhatsAppTemplateNotification({
+    const ownerMsg = buildOwnerOrderNotificationMessage(order);
+    const ownerNotification = await createOrderNotification({
       order,
       type: 'NEW_ORDER_OWNER',
-      recipient: whatsappConfig.ownerNumber,
-      templateName: whatsappConfig.newOrderTemplate,
+      recipient: ownerWhatsappNumber,
       status: 'PENDING',
     });
-    res.status(201).json({ ...mapOrder(order), notification: { sent: notification.sent, error: notification.error || null } });
+    if (ownerNotification.notificationId) {
+      db.prepare('UPDATE orders SET notification_status = ? WHERE id = ?').run('PREPARED', orderId);
+    }
+    const whatsappUrl = ownerNotification.whatsappUrl || buildWhatsAppUrl(ownerWhatsappNumber, ownerMsg);
+    res.status(201).json({ success: true, order: mapOrder(order), whatsappUrl });
   } catch (error) {
     db.exec('ROLLBACK');
     if (String(error.message).includes('UNIQUE')) {
       const existingDuplicate = db.prepare('SELECT * FROM orders WHERE idempotency_key = ?').get(idempotencyKey);
-      if (existingDuplicate) return res.status(200).json(mapOrder(existingDuplicate));
+      if (existingDuplicate) {
+        const existingOwnerMsg = buildOwnerOrderNotificationMessage(existingDuplicate);
+        const existingWhatsappUrl = buildWhatsAppUrl(ownerWhatsappNumber, existingOwnerMsg);
+        return res.status(200).json({ success: true, order: mapOrder(existingDuplicate), whatsappUrl: existingWhatsappUrl });
+      }
     }
     const message = String(error.message || 'Unable to create order. Please try again.');
     res.status(400).json({ error: message.includes('Insufficient stock') || message.includes('unavailable') || message.includes('Invalid quantity') ? message : 'Unable to create order. Please try again.' });
   }
-});
+};
+app.post('/api/orders', auth, handleCreateCustomerOrder);
+app.post('/api/me/orders', auth, handleCreateCustomerOrder);
 app.get('/api/catalog', (_req, res) => { const categories = db.prepare("SELECT * FROM categories WHERE status = 'ACTIVE' ORDER BY sort_order, name").all().map(mapCategory); const products = db.prepare(`${productSelect} WHERE p.status = 'ACTIVE' ORDER BY p.created_at DESC`).all().map(mapProduct); res.json({ categories, products }); });
 app.get('/api/categories', (_req, res) => {
   const rows = db.prepare('SELECT * FROM categories ORDER BY sort_order, name').all();
