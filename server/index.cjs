@@ -1524,6 +1524,9 @@ app.use((req, res, next) => { if (req.method !== 'GET' || req.path.startsWith('/
 app.use((error, _req, res, _next) => {
   console.error('UNEXPECTED_SERVER_ERROR');
   console.error(error && error.stack ? error.stack : error);
-  res.status(500).json({ error: 'Unexpected server error' });
+  // Temporarily send actual error in production for debugging
+  const errorMessage = error && error.message ? error.message : 'Unexpected server error';
+  const errorDetails = isProduction ? { error: errorMessage, stack: error && error.stack ? error.stack : null } : { error: 'Unexpected server error' };
+  res.status(500).json(errorDetails);
 });
 app.listen(port, () => console.log(`Catalog API listening on http://localhost:${port}`));
