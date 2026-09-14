@@ -974,13 +974,35 @@ function App() {
   const [selected, setSelected] = useState<Product | null>(null);
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("All");
-  const [cart, setCart] = useState<{ product: Product; quantity: number }[]>(() => {
+  const [cart, setCart] = useState<{ product: Product; quantity: number }[]>([]);
+  
+  // Initialize cart from localStorage after products are loaded
+  useEffect(() => {
+    if (products.length === 0) return;
+    
     try {
-      return JSON.parse(localStorage.getItem("murugesan-cart") || "[]");
-    } catch {
-      return [];
+      const stored = localStorage.getItem("murugesan-cart");
+      if (!stored) return;
+      
+      const minimalCart = JSON.parse(stored);
+      if (!Array.isArray(minimalCart)) return;
+      
+      // Restore full cart by matching product IDs
+      const restoredCart = minimalCart
+        .map((item: any) => {
+          const product = products.find(p => p.id === item.productId);
+          return product ? { product, quantity: item.quantity || 1 } : null;
+        })
+        .filter((item): item is { product: Product; quantity: number } => item !== null);
+      
+      if (restoredCart.length > 0) {
+        setCart(restoredCart);
+      }
+    } catch (error) {
+      console.error('[Cart] Failed to restore from localStorage:', error);
+      localStorage.removeItem("murugesan-cart");
     }
-  });
+  }, [products]);
   const [editing, setEditing] = useState<Product | null>(null);
   const [authToken, setAuthToken] = useState(() => readStoredToken("murugesan-auth-token"));
   const [customerToken, setCustomerToken] = useState(() => readStoredToken("murugesan-customer-token"));
@@ -998,7 +1020,25 @@ function App() {
     return () => window.removeEventListener("popstate", handleBack);
   }, []);
   useEffect(() => {
-    localStorage.setItem("murugesan-cart", JSON.stringify(cart));
+    try {
+      // Only save minimal cart data (id and quantity) to avoid localStorage quota
+      const minimalCart = cart.map(item => ({
+        productId: item.product.id,
+        quantity: item.quantity
+      }));
+      localStorage.setItem("murugesan-cart", JSON.stringify(minimalCart));
+    } catch (error) {
+      console.error('[Cart] Failed to save to localStorage:', error);
+      // If quota exceeded, clear cart from localStorage
+      if (error instanceof DOMException && error.name === 'QuotaExceededError') {
+        try {
+          localStorage.removeItem("murugesan-cart");
+          console.warn('[Cart] Cleared cart from localStorage due to quota exceeded');
+        } catch {
+          // Ignore
+        }
+      }
+    }
   }, [cart]);
   useEffect(() => {
     let mounted = true;
@@ -1071,18 +1111,43 @@ function App() {
     window.scrollTo({ top: 0 });
   };
   const addToCart = (product: Product) => {
-    if (!product.stock) return notify("This product is currently out of stock");
-    setCart((items) => {
-      const current = items.find((item) => item.product.id === product.id);
-      return current
-        ? items.map((item) =>
-            item.product.id === product.id
-              ? { ...item, quantity: item.quantity + 1 }
-              : item,
-          )
-        : [...items, { product, quantity: 1 }];
-    });
-    notify("Added to cart");
+    try {
+      console.log('[addToCart] Adding product:', product);
+      
+      if (!product) {
+        console.error('[addToCart] Product is null or undefined');
+        notify("Unable to add to cart");
+        return;
+      }
+      
+      if (!product.stock || product.stock <= 0) {
+        console.log('[addToCart] Product out of stock:', product.stock);
+        notify("This product is currently out of stock");
+        return;
+      }
+      
+      console.log('[addToCart] Current cart:', cart);
+      
+      setCart((items) => {
+        const current = items.find((item) => item.product.id === product.id);
+        const nextCart = current
+          ? items.map((item) =>
+              item.product.id === product.id
+                ? { ...item, quantity: item.quantity + 1 }
+                : item,
+            )
+          : [...items, { product, quantity: 1 }];
+        
+        console.log('[addToCart] Updated cart:', nextCart);
+        return nextCart;
+      });
+      
+      notify("Added to cart");
+      console.log('[addToCart] Success!');
+    } catch (error) {
+      console.error('[addToCart] Error:', error);
+      notify("Unable to add to cart. Please try again.");
+    }
   };
   const setCartQuantity = (product: Product, quantity: number) => {
     if (!product.stock) return;
