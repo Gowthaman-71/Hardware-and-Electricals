@@ -2071,13 +2071,8 @@ function BulkProductImport({
         // Existing products are sent to the server for the selected update mode.
       }
       if (!product.name) error("Product Name", "Product name is required");
-      if (
-        !categories.some(
-          (category) =>
-            category.name.toLowerCase() === product.category.toLowerCase(),
-        )
-      )
-        error("Category", `Category "${product.category}" does not exist`);
+      if (!product.category || !product.category.trim())
+        error("Category", "Category is required");
       const priceText = rawValue("Price", "Price (₹)", "Price ₹");
       const stockText = rawValue("Stock", "Stock Qty", "Stock Quantity", "Quantity");
       if (!priceText || !Number.isFinite(product.price) || product.price < 0)

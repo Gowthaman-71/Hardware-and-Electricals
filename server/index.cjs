@@ -1279,56 +1279,147 @@ app.post('/api/products/bulk-import', auth, admin, (req, res) => {
   const rows = Array.isArray(req.body?.products) ? req.body.products : [];
   const duplicateMode = req.body?.duplicateMode === 'update' ? 'update' : 'skip';
   if (!rows.length) return res.status(400).json({ error: 'At least one product is required' });
-  const results = [];
-  const validRows = [];
-  const seenSkus = new Set();
+  
+  // Helper function to normalize category names for comparison
+  const normalizeCategoryName = (value) => {
+    return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  };
+  
+  // STAGE 1: Collect and resolve all categories first
+  const categoryNames = new Set();
   for (const entry of rows) {
-    const row = Number(entry?.row || 0);
     const product = entry?.product && typeof entry.product === 'object' ? entry.product : entry;
-    const sku = String(product?.sku || product?.code || '').trim();
-    const name = String(product?.name || '').trim();
-    const categoryId = Number(product?.categoryId);
-    const priceText = String(product?.price ?? '').trim();
-    const stockText = String(product?.stock ?? '').trim();
-    const price = Number(priceText);
-    const stock = Number(stockText);
-    const errors = [];
-    const normalizedSku = sku.toLowerCase();
-    if (!sku) errors.push('Missing SKU');
-    if (seenSkus.has(normalizedSku)) errors.push('Duplicate SKU in this file');
-    if (sku) seenSkus.add(normalizedSku);
-    if (!name) errors.push('Missing product name');
-    if (!Number.isInteger(categoryId) || categoryId <= 0) errors.push('Invalid category');
-    if (!priceText || !Number.isFinite(price) || price < 0) errors.push('Invalid price');
-    if (!stockText || !Number.isInteger(stock) || stock < 0) errors.push('Invalid stock');
-    const discount = Number(product?.discount ?? 0);
-    if (!Number.isFinite(discount) || discount < 0 || discount > 100) errors.push('Invalid discount');
-    const status = String(product?.status || 'ACTIVE').toUpperCase();
-    if (!['ACTIVE', 'INACTIVE', 'ARCHIVED'].includes(status)) errors.push('Invalid status');
-    const category = Number.isInteger(categoryId) ? db.prepare("SELECT id FROM categories WHERE id = ? AND status != 'ARCHIVED'").get(categoryId) : null;
-    if (!category) errors.push('Category not found');
-    if (errors.length) {
-      results.push({ row, sku, status: 'failed', reason: errors.join('; ') });
-      continue;
+    const categoryName = String(product?.category || '').trim();
+    if (categoryName) {
+      categoryNames.add(categoryName);
     }
-    validRows.push({ row, sku, name, categoryId, price, stock, discount, status, product });
   }
+  
+  // Build category map: normalized name -> category ID
+  const categoryMap = new Map();
+  const timestamp = now();
+  
   try {
     db.exec('BEGIN IMMEDIATE');
-    const timestamp = now();
+    
+    // Load existing categories
+    const existingCategories = db.prepare("SELECT id, name FROM categories WHERE status != 'ARCHIVED'").all();
+    for (const cat of existingCategories) {
+      const normalized = normalizeCategoryName(cat.name);
+      if (!categoryMap.has(normalized)) {
+        categoryMap.set(normalized, { id: cat.id, name: cat.name });
+      }
+    }
+    
+    // Create missing categories
+    const categoriesToCreate = [];
+    for (const categoryName of categoryNames) {
+      const normalized = normalizeCategoryName(categoryName);
+      if (!categoryMap.has(normalized)) {
+        categoriesToCreate.push(categoryName);
+      }
+    }
+    
+    for (const categoryName of categoriesToCreate) {
+      const normalized = normalizeCategoryName(categoryName);
+      const slug = slugify(categoryName);
+      
+      // Check if slug already exists and generate unique one if needed
+      let uniqueSlug = slug;
+      let counter = 1;
+      while (db.prepare('SELECT id FROM categories WHERE slug = ?').get(uniqueSlug)) {
+        uniqueSlug = `${slug}-${counter}`;
+        counter++;
+      }
+      
+      try {
+        const result = db.prepare('INSERT INTO categories (name,slug,description,sort_order,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').run(
+          categoryName,
+          uniqueSlug,
+          '',
+          0,
+          'ACTIVE',
+          timestamp,
+          timestamp
+        );
+        categoryMap.set(normalized, { id: Number(result.lastInsertRowid), name: categoryName });
+      } catch (error) {
+        // If duplicate error, try to find it again (race condition)
+        if (String(error?.message || '').match(/UNIQUE|duplicate/i)) {
+          const existing = db.prepare("SELECT id, name FROM categories WHERE LOWER(name) = LOWER(?)").get(categoryName);
+          if (existing) {
+            categoryMap.set(normalized, { id: existing.id, name: existing.name });
+          } else {
+            throw error;
+          }
+        } else {
+          throw error;
+        }
+      }
+    }
+    
+    // STAGE 2: Validate products with resolved categories
+    const results = [];
+    const validRows = [];
+    const seenSkus = new Set();
+    
+    for (const entry of rows) {
+      const row = Number(entry?.row || 0);
+      const product = entry?.product && typeof entry.product === 'object' ? entry.product : entry;
+      const sku = String(product?.sku || product?.code || '').trim();
+      const name = String(product?.name || '').trim();
+      const categoryName = String(product?.category || '').trim();
+      const priceText = String(product?.price ?? '').trim();
+      const stockText = String(product?.stock ?? '').trim();
+      const price = Number(priceText);
+      const stock = Number(stockText);
+      const errors = [];
+      const normalizedSku = sku.toLowerCase();
+      
+      if (!sku) errors.push('Missing SKU');
+      if (seenSkus.has(normalizedSku)) errors.push('Duplicate SKU in this file');
+      if (sku) seenSkus.add(normalizedSku);
+      if (!name) errors.push('Missing product name');
+      if (!categoryName) errors.push('Category is required');
+      if (!priceText || !Number.isFinite(price) || price < 0) errors.push('Invalid price');
+      if (!stockText || !Number.isInteger(stock) || stock < 0) errors.push('Invalid stock');
+      const discount = Number(product?.discount ?? 0);
+      if (!Number.isFinite(discount) || discount < 0 || discount > 100) errors.push('Invalid discount');
+      const status = String(product?.status || 'ACTIVE').toUpperCase();
+      if (!['ACTIVE', 'INACTIVE', 'ARCHIVED'].includes(status)) errors.push('Invalid status');
+      
+      // Resolve category ID from the map
+      const normalizedCategory = normalizeCategoryName(categoryName);
+      const categoryInfo = categoryMap.get(normalizedCategory);
+      const categoryId = categoryInfo ? categoryInfo.id : null;
+      
+      if (!categoryId) errors.push('Category could not be resolved');
+      
+      if (errors.length) {
+        results.push({ row, sku, status: 'failed', reason: errors.join('; ') });
+        continue;
+      }
+      
+      validRows.push({ row, sku, name, categoryId, price, stock, discount, status, product });
+    }
+    
+    // STAGE 3: Import products
     const findProduct = db.prepare('SELECT * FROM products WHERE LOWER(sku) = LOWER(?) LIMIT 1');
     const insertProduct = db.prepare('INSERT INTO products (sku,name,slug,category_id,brand_id,product_type_id,description,details,price,mrp,discount,stock,unit,image_url,image_urls_json,attributes_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
     const updateProduct = db.prepare('UPDATE products SET name = ?, category_id = ?, brand_id = ?, product_type_id = ?, description = ?, details = ?, price = ?, mrp = ?, discount = ?, stock = ?, unit = ?, image_url = ?, image_urls_json = ?, attributes_json = ?, status = ?, updated_at = ? WHERE id = ?');
+    
     for (const item of validRows) {
       const existing = findProduct.get(item.sku);
       if (existing && duplicateMode === 'skip') {
         results.push({ row: item.row, sku: item.sku, status: 'skipped', reason: 'SKU already exists' });
         continue;
       }
+      
       const product = item.product;
       const brandName = String(product.brand || '').trim();
       const brand = brandName ? db.prepare('SELECT id FROM brands WHERE LOWER(name) = LOWER(?) LIMIT 1').get(brandName) : null;
       const productTypeName = String(product.productType || product.details || '').trim();
+      
       let resolvedBrand = brand;
       if (brandName && !resolvedBrand) {
         try {
@@ -1339,6 +1430,7 @@ app.post('/api/products/bulk-import', auth, admin, (req, res) => {
           resolvedBrand = db.prepare('SELECT id FROM brands WHERE LOWER(name) = LOWER(?) LIMIT 1').get(brandName);
         }
       }
+      
       let resolvedProductType = productTypeName ? db.prepare('SELECT id FROM product_types WHERE category_id = ? AND LOWER(name) = LOWER(?) LIMIT 1').get(item.categoryId, productTypeName) : null;
       if (productTypeName && !resolvedProductType) {
         try {
@@ -1349,8 +1441,10 @@ app.post('/api/products/bulk-import', auth, admin, (req, res) => {
           resolvedProductType = db.prepare('SELECT id FROM product_types WHERE category_id = ? AND LOWER(name) = LOWER(?) LIMIT 1').get(item.categoryId, productTypeName);
         }
       }
+      
       const values = [item.name, item.categoryId, resolvedBrand?.id || null, resolvedProductType?.id || null, String(product.description || ''), String(product.details || ''), item.price, Number(product.mrp || item.price), item.discount, item.stock, String(product.unit || 'Nos'), product.imageUrl || product.image || null, JSON.stringify(Array.isArray(product.imageUrls) ? product.imageUrls : []), JSON.stringify(product.attributes || {}), item.status];
       const insertValues = values.slice(1);
+      
       if (existing) {
         updateProduct.run(...values, timestamp, existing.id);
         results.push({ row: item.row, sku: item.sku, status: 'updated', productId: Number(existing.id) });
@@ -1359,12 +1453,14 @@ app.post('/api/products/bulk-import', auth, admin, (req, res) => {
         results.push({ row: item.row, sku: item.sku, status: 'imported' });
       }
     }
+    
     db.exec('COMMIT');
   } catch (error) {
     try { db.exec('ROLLBACK'); } catch { /* transaction already closed */ }
     console.error('[api/products/bulk-import]', error && error.stack ? error.stack : error);
     return res.status(500).json({ error: 'Unable to persist imported products' });
   }
+  
   const imported = results.filter((result) => result.status === 'imported' || result.status === 'updated').length;
   const skipped = results.filter((result) => result.status === 'skipped').length;
   const failed = results.filter((result) => result.status === 'failed').length;
