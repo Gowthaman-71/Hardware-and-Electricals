@@ -2713,14 +2713,15 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
     if (!apiToken) return;
     setLoading(true);
     try {
-      const response = await fetch("/api/admin/orders", {
+      const response = await fetchWithTimeout("/api/admin/orders", {
         headers: { Authorization: `Bearer ${apiToken}` },
       });
       if (!response.ok) throw new Error("Unable to load orders");
       const rows = (await response.json()) as CustomerOrder[];
       setOrders(rows);
-    } catch {
-      notify("Unable to load orders");
+    } catch (error) {
+      console.error('[AdminOrdersList] Load orders error:', error);
+      notify(error instanceof Error ? error.message : "Unable to load orders");
     } finally {
       setLoading(false);
     }
@@ -2738,37 +2739,42 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
     return matchesStatus && matchesQuery;
   });
   const updateStatus = async (orderId: number, nextStatus: string) => {
-    const response = await fetch(`/api/admin/orders/${orderId}/status`, {
-      method: "PATCH",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiToken}`,
-      },
-      body: JSON.stringify({ status: nextStatus }),
-    });
-    if (!response.ok) {
-      notify("Unable to update order status");
-      return;
+    try {
+      const response = await fetchWithTimeout(`/api/admin/orders/${orderId}/status`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiToken}`,
+        },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      if (!response.ok) {
+        notify("Unable to update order status");
+        return;
+      }
+      const updated = (await response.json()) as CustomerOrder;
+      setOrders((current) =>
+        current.map((order) => (order.id === updated.id ? updated : order)),
+      );
+      const notificationUrl = updated.notification?.whatsappUrl;
+      if (nextStatus === "CONFIRMED" && notificationUrl) {
+        notify("Order confirmed. Opening WhatsApp...");
+        openWhatsAppUrl(notificationUrl);
+        return;
+      }
+      notify(
+        updated.notification?.error
+          ? `Order status updated, but WhatsApp failed: ${updated.notification.error}`
+          : "Order status updated",
+      );
+    } catch (error) {
+      console.error('[AdminOrdersList] Update status error:', error);
+      notify(error instanceof Error ? error.message : "Unable to update order status");
     }
-    const updated = (await response.json()) as CustomerOrder;
-    setOrders((current) =>
-      current.map((order) => (order.id === updated.id ? updated : order)),
-    );
-    const notificationUrl = updated.notification?.whatsappUrl;
-    if (nextStatus === "CONFIRMED" && notificationUrl) {
-      notify("Order confirmed. Opening WhatsApp...");
-      openWhatsAppUrl(notificationUrl);
-      return;
-    }
-    notify(
-      updated.notification?.error
-        ? `Order status updated, but WhatsApp failed: ${updated.notification.error}`
-        : "Order status updated",
-    );
   };
   const confirmOrder = async (order: CustomerOrder) => {
     try {
-      const response = await fetch(`/api/orders/${order.id}/confirm`, {
+      const response = await fetchWithTimeout(`/api/orders/${order.id}/confirm`, {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
@@ -2800,28 +2806,33 @@ function AdminOrdersList({ notify }: { notify: (message: string) => void }) {
       }
     } catch (error) {
       console.error("Confirm order error:", error);
-      notify("Unable to confirm order. Please try again.");
+      notify(error instanceof Error ? error.message : "Unable to confirm order. Please try again.");
     }
   };
   const notifyCustomer = async (order: CustomerOrder) => {
-    const response = await fetch(`/api/orders/${order.id}/notify`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiToken}` },
-    });
-    if (!response.ok) {
-      const result = await response.json().catch(() => ({}));
-      notify(result.error || "Customer notification could not be prepared.");
-      return;
-    }
-    const result = (await response.json()) as { whatsappUrl?: string; url?: string };
-    const url = result.whatsappUrl || result.url || "";
-    if (!url) {
-      notify("Customer notification could not be prepared.");
-      return;
-    }
-    const opened = openWhatsAppUrl(url);
-    if (!opened) {
-      notify("WhatsApp could not be opened.");
+    try {
+      const response = await fetchWithTimeout(`/api/orders/${order.id}/notify`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiToken}` },
+      });
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        notify(result.error || "Customer notification could not be prepared.");
+        return;
+      }
+      const result = (await response.json()) as { whatsappUrl?: string; url?: string };
+      const url = result.whatsappUrl || result.url || "";
+      if (!url) {
+        notify("Customer notification could not be prepared.");
+        return;
+      }
+      const opened = openWhatsAppUrl(url);
+      if (!opened) {
+        notify("WhatsApp could not be opened.");
+      }
+    } catch (error) {
+      console.error('[AdminOrdersList] Notify customer error:', error);
+      notify(error instanceof Error ? error.message : "Customer notification could not be prepared.");
     }
   };
   return (
@@ -3024,7 +3035,9 @@ function AdminProducts({
   };
   const save = async (product: Product) => {
     try {
+      console.log('[AdminProducts] Saving product:', product);
       const saved = await saveProductRequest(apiToken, product, categories);
+      console.log('[AdminProducts] Product saved successfully:', saved);
       setProducts(
         product.id
           ? products.map((item) => (item.id === saved.id ? saved : item))
@@ -3033,7 +3046,9 @@ function AdminProducts({
       setEditing(null);
       notify(product.id ? "Product updated successfully" : "Product added successfully");
     } catch (reason) {
+      console.error('[AdminProducts] Save error:', reason);
       notify(reason instanceof Error ? reason.message : "Unable to save product. Please try again.");
+      throw reason; // Re-throw so the form can handle it
     }
   };
   const remove = async (id: number) => {
@@ -3231,7 +3246,7 @@ function ProductForm({
     <div className="form-overlay">
       <form
         className="product-form"
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault();
           if (form.name.trim() && form.code.trim() && form.price > 0) {
             setSaving(true);
@@ -3240,7 +3255,13 @@ function ProductForm({
               stock: normalizeProductStock(form.stock),
               image: form.image || fallbackImage,
             };
-            Promise.resolve(onSave(nextProduct)).finally(() => setSaving(false));
+            try {
+              await onSave(nextProduct);
+            } catch (error) {
+              console.error('[ProductForm] Save failed:', error);
+            } finally {
+              setSaving(false);
+            }
           }
         }}
       >
@@ -3409,22 +3430,41 @@ function LegacyAdminCategories({
       </div>
       <form
         className="inline-add"
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault();
-          if (name.trim()) {
-            setCategories([
-              ...categories,
-              {
-                id: 0,
+          if (!name.trim()) return;
+          
+          const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
+          if (!apiToken) {
+            notify("Not authenticated");
+            return;
+          }
+          
+          try {
+            const response = await fetchWithTimeout("/api/categories", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${apiToken}`,
+              },
+              body: JSON.stringify({
                 name: name.trim(),
                 description: "New product category.",
                 active: true,
-                slug: "",
-                attributes: [],
-              },
-            ]);
+              }),
+            });
+            
+            if (!response.ok) {
+              const error = await response.json().catch(() => ({}));
+              throw new Error(error.error || "Failed to create category");
+            }
+            
+            const newCategory = await response.json();
+            setCategories([...categories, newCategory]);
             setName("");
-            notify("Category added");
+            notify("Category added successfully");
+          } catch (error) {
+            notify(error instanceof Error ? error.message : "Failed to add category");
           }
         }}
       >
@@ -3446,11 +3486,45 @@ function LegacyAdminCategories({
               products
             </small>
             <button
-              onClick={() => {
-                if (window.confirm(`Delete ${category.name}?`))
-                  setCategories(
-                    categories.filter((item) => item.id !== category.id),
-                  );
+              onClick={async () => {
+                if (!window.confirm(`Delete ${category.name}?`)) return;
+                
+                const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
+                if (!apiToken) {
+                  notify("Not authenticated");
+                  return;
+                }
+                
+                try {
+                  const response = await fetchWithTimeout(`/api/categories/${category.id}/archive`, {
+                    method: "PATCH",
+                    headers: { Authorization: `Bearer ${apiToken}` },
+                  });
+                  
+                  if (!response.ok) {
+                    throw new Error("Failed to delete category");
+                  }
+                  
+                  const result = await response.json();
+                  
+                  // Refresh categories from server
+                  const refreshed = await fetchWithTimeout(`/api/categories`, {
+                    headers: { Authorization: `Bearer ${apiToken}` },
+                  });
+                  
+                  if (refreshed.ok) {
+                    const updatedCategories = await refreshed.json();
+                    setCategories(updatedCategories);
+                  }
+                  
+                  if (result.deleted) {
+                    notify("Category deleted successfully");
+                  } else if (result.archived) {
+                    notify(`Category archived (has ${result.productCount} products)`);
+                  }
+                } catch (error) {
+                  notify(error instanceof Error ? error.message : "Failed to delete category");
+                }
               }}
             >
               Delete
