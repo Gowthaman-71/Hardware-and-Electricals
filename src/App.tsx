@@ -139,16 +139,24 @@ function DynamicCategoryManager({
       )
     )
       return;
-    const response = await fetch(`/api/categories/${category.id}/archive`, {
+    const response = await fetchWithTimeout(`/api/categories/${category.id}/archive`, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${apiToken}` },
     });
     if (!response.ok) return notify("Unable to archive category");
     const result = await response.json();
-    if (result.status === "ARCHIVED") {
-      setCategories(categories.map(item => item.id === result.id ? result : item));
+    // Backend returns {archived: true, ...} or {deleted: true, ...}
+    if (result.archived) {
+      // Category was archived (has products) - refresh from server to get updated status
+      const refreshed = await fetchWithTimeout(`/api/categories`, {
+        headers: { Authorization: `Bearer ${apiToken}` },
+      });
+      if (refreshed.ok) {
+        const allCategories = await refreshed.json();
+        setCategories(allCategories);
+      }
       notify("Category archived (contains products)");
-    } else {
+    } else if (result.deleted) {
       setCategories(categories.filter((item) => item.id !== category.id));
       notify("Category deleted");
     }
@@ -831,7 +839,7 @@ async function saveProductRequest(
   const categoryId = product.categoryId || activeCategories.find((item) => item.name === product.category)?.id;
   if (!product.code.trim() || !product.name.trim() || !categoryId) throw new Error("Product code, name and category are required");
   const sanitizedStock = normalizeProductStock(product.stock);
-  const response = await fetch(product.id ? `/api/products/${product.id}` : "/api/products", {
+  const response = await fetchWithTimeout(product.id ? `/api/products/${product.id}` : "/api/products", {
     method: product.id ? "PATCH" : "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify({ sku: product.code.trim(), name: product.name.trim(), categoryId, brand: product.brand, description: product.description, details: product.details, price: product.price, mrp: product.mrp || product.price, stock: sanitizedStock, unit: product.unit, imageUrl: product.image || null, attributes: product.attributes || {}, status: product.status === "Inactive" ? "INACTIVE" : "ACTIVE" }),
@@ -845,7 +853,7 @@ async function saveProductStockRequest(
   productId: number,
   stock: number,
 ): Promise<Product> {
-  const response = await fetch(`/api/products/${productId}`, {
+  const response = await fetchWithTimeout(`/api/products/${productId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify({ stock }),
