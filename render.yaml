@@ -16,9 +16,9 @@ services:
       - key: ADMIN_MOBILE
         value: 9361866771
       - key: BUSINESS_WHATSAPP_NUMBER
-        value: +919361866771
+        value: 919361866771
       - key: VITE_BUSINESS_WHATSAPP_NUMBER
-        value: +919361866771
+        value: 919361866771
       - key: WHATSAPP_ACCESS_TOKEN
         sync: false
       - key: WHATSAPP_PHONE_NUMBER_ID
@@ -27,7 +27,7 @@ services:
         sync: false
       - key: WHATSAPP_API_VERSION
         value: v23.0
-      - key: WHATSAPP_OWNER_NUMBER
+      - key: OWNER_WHATSAPP_NUMBER
         value: 919361866771
       - key: WHATSAPP_NEW_ORDER_TEMPLATE
         sync: false
