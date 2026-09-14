@@ -22,7 +22,9 @@ function DynamicCategoryManager({
     (category) =>
       category.name.toLowerCase().includes(search.toLowerCase()) &&
       (status === "All" ||
-        (category.active !== false ? "Active" : "Inactive") === status),
+        (status === "Archived" && category.status === "ARCHIVED") ||
+        (status === "Active" && category.status !== "ARCHIVED" && category.active !== false) ||
+        (status === "Inactive" && category.status !== "ARCHIVED" && category.active === false)),
   );
   const update = async (category: Category) => {
     const response = await fetch(`/api/categories/${category.id}`, {
@@ -142,8 +144,14 @@ function DynamicCategoryManager({
       headers: { Authorization: `Bearer ${apiToken}` },
     });
     if (!response.ok) return notify("Unable to archive category");
-    setCategories(categories.filter((item) => item.id !== category.id));
-    notify(count ? "Category archived" : "Category deleted");
+    const result = await response.json();
+    if (result.status === "ARCHIVED") {
+      setCategories(categories.map(item => item.id === result.id ? result : item));
+      notify("Category archived (contains products)");
+    } else {
+      setCategories(categories.filter((item) => item.id !== category.id));
+      notify("Category deleted");
+    }
   };
   return (
     <>
@@ -191,6 +199,7 @@ function DynamicCategoryManager({
           <option>All</option>
           <option>Active</option>
           <option>Inactive</option>
+          <option>Archived</option>
         </select>
       </div>
       <div className="category-admin-grid">
@@ -201,7 +210,10 @@ function DynamicCategoryManager({
             ) : (
               <span>◇</span>
             )}
-            <strong>{category.name}</strong>
+            <strong>
+              {category.name}
+              {category.status === "ARCHIVED" && <em style={{marginLeft: "8px", color: "#999", fontSize: "0.85em", fontStyle: "normal"}}>(Archived)</em>}
+            </strong>
             <small>
               {category.parentId
                 ? `Under ${categories.find((item) => item.id === category.parentId)?.name || "category"}`
@@ -214,19 +226,34 @@ function DynamicCategoryManager({
               products
             </small>
             <small>
-              {category.active === false ? "Inactive" : "Active"} ·{" "}
+              {category.status === "ARCHIVED" ? "Archived" : category.active === false ? "Inactive" : "Active"} ·{" "}
               {category.attributes?.length || 0} attributes
             </small>
             <div>
-              <button onClick={() => setEditing(category)}>Edit</button>
-              <button
-                onClick={() =>
-                  update({ ...category, active: category.active === false })
-                }
-              >
-                {category.active === false ? "Enable" : "Disable"}
-              </button>
-              <button onClick={() => remove(category)}>Delete</button>
+              {category.status === "ARCHIVED" ? (
+                <button onClick={async () => {
+                  const response = await fetch(`/api/categories/${category.id}/restore`, {
+                    method: "PATCH",
+                    headers: { Authorization: `Bearer ${apiToken}` },
+                  });
+                  if (!response.ok) return notify("Unable to restore category");
+                  const restored = (await response.json()) as Category;
+                  setCategories(categories.map(item => item.id === restored.id ? restored : item));
+                  notify("Category restored");
+                }}>Restore</button>
+              ) : (
+                <>
+                  <button onClick={() => setEditing(category)}>Edit</button>
+                  <button
+                    onClick={() =>
+                      update({ ...category, active: category.active === false })
+                    }
+                  >
+                    {category.active === false ? "Enable" : "Disable"}
+                  </button>
+                  <button onClick={() => remove(category)}>Delete</button>
+                </>
+              )}
             </div>
           </div>
         ))}
@@ -579,6 +606,7 @@ type Category = {
   brands?: string[];
   types?: string[];
   attributes?: CategoryAttribute[];
+  status?: "ACTIVE" | "INACTIVE" | "ARCHIVED";
 };
 type Screen =
   | "home"
@@ -748,6 +776,14 @@ async function loadCatalog(): Promise<{
 }> {
   const response = await fetch("/api/catalog", { cache: "no-store" });
   if (!response.ok) throw new Error("Unable to load catalog");
+  return response.json();
+}
+async function loadAllCategories(token: string): Promise<Category[]> {
+  const response = await fetch("/api/categories", {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error("Unable to load categories");
   return response.json();
 }
 async function loginRequest(
@@ -2337,6 +2373,12 @@ function Admin({
       .then((rows: CustomerOrder[]) => setOrderCount(rows.length))
       .catch(() => setOrderCount(0));
   }, [apiToken, view]);
+  useEffect(() => {
+    if (!apiToken) return;
+    loadAllCategories(apiToken)
+      .then((allCategories) => setCategories(allCategories))
+      .catch(() => {});
+  }, [apiToken]);
   return (
     <>
       <header className="admin-header">
