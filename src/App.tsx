@@ -1932,17 +1932,43 @@ function Cart({
                   >
                     −
                   </button>
-                  <b>{quantity}</b>
+                  <input
+                    type="number"
+                    min="1"
+                    max={product.stock || 9999}
+                    value={quantity}
+                    onChange={(e) => {
+                      const newQty = parseInt(e.target.value) || 1;
+                      const validQty = Math.max(1, Math.min(product.stock || 9999, newQty));
+                      setCart(
+                        items.map((item) =>
+                          item.product.id === product.id
+                            ? { ...item, quantity: validQty }
+                            : item,
+                        ),
+                      );
+                    }}
+                    style={{
+                      width: '60px',
+                      textAlign: 'center',
+                      border: '1px solid #ddd',
+                      borderRadius: '4px',
+                      padding: '4px',
+                      fontSize: '14px'
+                    }}
+                  />
                   <button
                     onClick={() =>
                       setCart(
                         items.map((item) =>
                           item.product.id === product.id
-                            ? { ...item, quantity: quantity + 1 }
+                            ? { ...item, quantity: Math.min(product.stock || 9999, quantity + 1) }
                             : item,
                         ),
                       )
                     }
+                    disabled={quantity >= (product.stock || 9999)}
+                    style={{ opacity: quantity >= (product.stock || 9999) ? 0.4 : 1, cursor: quantity >= (product.stock || 9999) ? 'not-allowed' : 'pointer' }}
                   >
                     +
                   </button>
