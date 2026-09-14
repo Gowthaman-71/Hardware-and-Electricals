@@ -745,7 +745,17 @@ console.log('[database] Connected', { path: isProduction ? 'postgresql://configu
 
 const app = express();
 console.log('[database] Configured', { path: isProduction ? 'postgresql://configured-via-DATABASE_URL' : databasePath, resolvedPath: resolvedDatabasePath, uploadDirectory, resolvedUploadDirectory, jwtSecretConfigured: Boolean(jwtSecret), seedDemoData: seedDemoDataEnabled, mode: isProduction ? 'postgresql' : 'sqlite' });
-app.use(cors());
+
+// CORS configuration
+const corsOptions = {
+  origin: isProduction 
+    ? (process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : true)
+    : true,
+  credentials: true,
+  optionsSuccessStatus: 200
+};
+app.use(cors(corsOptions));
+
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.use((req, _res, next) => {
@@ -1302,11 +1312,22 @@ app.post('/api/products/bulk-import', auth, admin, (req, res) => {
   try {
     db.exec('BEGIN IMMEDIATE');
     
-    // Load existing categories
-    const existingCategories = db.prepare("SELECT id, name FROM categories WHERE status != 'ARCHIVED'").all();
+    // Load existing active and inactive categories
+    const existingCategories = db.prepare("SELECT id, name, status FROM categories WHERE status != 'ARCHIVED'").all();
     for (const cat of existingCategories) {
       const normalized = normalizeCategoryName(cat.name);
       if (!categoryMap.has(normalized)) {
+        categoryMap.set(normalized, { id: cat.id, name: cat.name });
+      }
+    }
+    
+    // Check for archived categories that match needed names and restore them
+    const archivedCategories = db.prepare("SELECT id, name FROM categories WHERE status = 'ARCHIVED'").all();
+    for (const cat of archivedCategories) {
+      const normalized = normalizeCategoryName(cat.name);
+      if (categoryNames.has(cat.name) && !categoryMap.has(normalized)) {
+        // Restore archived category
+        db.prepare("UPDATE categories SET status = 'ACTIVE', updated_at = ? WHERE id = ?").run(timestamp, cat.id);
         categoryMap.set(normalized, { id: cat.id, name: cat.name });
       }
     }

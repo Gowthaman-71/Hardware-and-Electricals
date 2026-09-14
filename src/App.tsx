@@ -770,16 +770,39 @@ const normalizeProductStock = (value: unknown): number => {
 };
 const statusOf = (stock: number) =>
   stock === 0 ? "Out of stock" : stock < 10 ? "Low stock" : "In stock";
+
+// Global fetch with timeout helper
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = 30000
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    throw error;
+  }
+}
+
 async function loadCatalog(): Promise<{
   products: Product[];
   categories: Category[];
 }> {
-  const response = await fetch("/api/catalog", { cache: "no-store" });
+  const response = await fetchWithTimeout("/api/catalog", { cache: "no-store" });
   if (!response.ok) throw new Error("Unable to load catalog");
   return response.json();
 }
 async function loadAllCategories(token: string): Promise<Category[]> {
-  const response = await fetch("/api/categories", {
+  const response = await fetchWithTimeout("/api/categories", {
     headers: { Authorization: `Bearer ${token}` },
     cache: "no-store",
   });
@@ -790,12 +813,12 @@ async function loginRequest(
   mobile: string,
   password: string,
 ): Promise<{ token: string }> {
-  const response = await fetch("/api/auth/login", {
+  const response = await fetchWithTimeout("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mobile: mobile.replace(/\D/g, ""), password }),
   });
-  if (!response.ok) throw new Error("Invalid mobile number or password");
+  if (!response.ok) throw new Error("Invalid credentials");
   return response.json();
 }
 async function saveProductRequest(
@@ -1907,7 +1930,7 @@ function Login({
         <Logo />
         <p className="eyebrow">STORE MANAGEMENT</p>
         <h1>Welcome back.</h1>
-        <p>Sign in with your mobile number and password.</p>
+        <p>Sign in with your mobile number or email and password.</p>
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -1918,21 +1941,19 @@ function Login({
                 setError(
                   reason instanceof Error
                     ? reason.message
-                    : "Invalid mobile number or password.",
+                    : "Invalid credentials.",
                 ),
               )
               .finally(() => setLoading(false));
           }}
         >
           <label>
-            Mobile number
+            Mobile number or email
             <input
               autoFocus
               value={mobile}
               onChange={(e) => setMobile(e.target.value)}
-              placeholder="+91 93618 67771"
-              inputMode="tel"
-              pattern="(?:\+?91[\s-]*)?[6-9](?:[\s-]*\d){9}"
+              placeholder="+91 93618 67771 or owner@murugesan.in"
               required
             />
           </label>
@@ -2504,12 +2525,40 @@ function AdminDashboard({
   onProducts: () => void;
 }) {
   void onProducts;
+  const [stats, setStats] = useState<{
+    products: number;
+    categories: number;
+    brands: number;
+    customers: number;
+    orders: number;
+    revenue: number;
+  } | null>(null);
+  const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
+  
+  useEffect(() => {
+    if (!apiToken || view !== "Dashboard") return;
+    fetch("/api/admin/stats", {
+      headers: { Authorization: `Bearer ${apiToken}` },
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data) setStats(data);
+      })
+      .catch(() => {});
+  }, [apiToken, view]);
+
   const low = products.filter((p) => p.stock > 0 && p.stock < 10).length;
+  const currentDate = new Date().toLocaleDateString('en-GB', { 
+    day: '2-digit', 
+    month: 'short', 
+    year: 'numeric' 
+  }).toUpperCase();
+  
   return (
     <>
       <div className="admin-topline">
         <div>
-          <p className="eyebrow">{view.toUpperCase()} / 03 SEP 2026</p>
+          <p className="eyebrow">{view.toUpperCase()} / {currentDate}</p>
           <h1>
             {view === "Dashboard" ? (
               <>
@@ -2529,7 +2578,7 @@ function AdminDashboard({
       </div>
       {view === "Dashboard" ? (
         <div className="stats-grid">
-          <Stat label="Total products" value={products.length} />
+          <Stat label="Total products" value={stats?.products ?? products.length} />
           <Stat
             label="Active products"
             value={
@@ -2545,11 +2594,9 @@ function AdminDashboard({
           />
           <Stat
             label="Active categories"
-            value={
-              categories.filter((category) => category.active !== false).length
-            }
+            value={stats?.categories ?? categories.filter((category) => category.active !== false).length}
           />
-          <Stat label="Orders / Enquiries" value={3} />
+          <Stat label="Orders" value={stats?.orders ?? 0} />
         </div>
       ) : (
         <section className="panel empty-admin">
@@ -3507,6 +3554,10 @@ function CustomerCheckout({
     setSubmitting(true);
     setMessage("");
 
+    // Create AbortController for timeout handling
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), 30000); // 30 second timeout
+
     try {
       const response = await fetch("/api/me/orders", {
         method: "POST",
@@ -3526,7 +3577,10 @@ function CustomerCheckout({
             price: product.price,
           })),
         }),
+        signal: abortController.signal,
       });
+      
+      clearTimeout(timeoutId);
       
       const rawResult = await response.json().catch(() => ({}));
       
@@ -3552,7 +3606,12 @@ function CustomerCheckout({
         setMessage("Order placed successfully, but WhatsApp could not be opened. Please contact the shop.");
       }
     } catch (error) {
-      setMessage("Unable to place the order. Please try again.");
+      clearTimeout(timeoutId);
+      if (error instanceof Error && error.name === 'AbortError') {
+        setMessage("Request timed out. Please check your connection and try again.");
+      } else {
+        setMessage("Unable to place the order. Please try again.");
+      }
     } finally {
       setSubmitting(false);
     }
