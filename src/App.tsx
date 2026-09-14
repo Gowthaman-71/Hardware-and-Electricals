@@ -834,19 +834,66 @@ async function saveProductRequest(
   product: Product,
   categories: Category[],
 ): Promise<Product> {
+  console.log('[saveProductRequest] Starting save with:', { product, categories });
+  
   // Filter to only ACTIVE categories for product assignment
   const activeCategories = categories.filter(c => c.status !== "ARCHIVED" && c.active !== false);
+  console.log('[saveProductRequest] Active categories:', activeCategories);
+  
   const categoryId = product.categoryId || activeCategories.find((item) => item.name === product.category)?.id;
-  if (!product.code.trim() || !product.name.trim() || !categoryId) throw new Error("Product code, name and category are required");
+  console.log('[saveProductRequest] Found categoryId:', categoryId, 'for category:', product.category);
+  
+  if (!product.code.trim()) throw new Error("Product code is required");
+  if (!product.name.trim()) throw new Error("Product name is required");
+  if (!categoryId) {
+    console.error('[saveProductRequest] Category not found! Available categories:', activeCategories.map(c => c.name));
+    throw new Error(`Category "${product.category}" not found. Please select a valid category.`);
+  }
+  
   const sanitizedStock = normalizeProductStock(product.stock);
-  const response = await fetchWithTimeout(product.id ? `/api/products/${product.id}` : "/api/products", {
-    method: product.id ? "PATCH" : "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ sku: product.code.trim(), name: product.name.trim(), categoryId, brand: product.brand, description: product.description, details: product.details, price: product.price, mrp: product.mrp || product.price, stock: sanitizedStock, unit: product.unit, imageUrl: product.image || null, attributes: product.attributes || {}, status: product.status === "Inactive" ? "INACTIVE" : "ACTIVE" }),
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.error || "Unable to save product");
-  return result as Product;
+  
+  const requestBody = { 
+    sku: product.code.trim(), 
+    name: product.name.trim(), 
+    categoryId, 
+    brand: product.brand || '', 
+    description: product.description || '', 
+    details: product.details || '', 
+    price: product.price, 
+    mrp: product.mrp || product.price, 
+    stock: sanitizedStock, 
+    unit: product.unit, 
+    imageUrl: product.image || null, 
+    attributes: product.attributes || {}, 
+    status: product.status === "Inactive" ? "INACTIVE" : "ACTIVE" 
+  };
+  
+  console.log('[saveProductRequest] Sending request to API:', requestBody);
+  
+  try {
+    const response = await fetchWithTimeout(product.id ? `/api/products/${product.id}` : "/api/products", {
+      method: product.id ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(requestBody),
+    });
+    
+    console.log('[saveProductRequest] Response status:', response.status);
+    
+    const result = await response.json().catch(() => ({}));
+    console.log('[saveProductRequest] Response body:', result);
+    
+    if (!response.ok) {
+      const errorMsg = result.error || result.message || "Unable to save product";
+      console.error('[saveProductRequest] API error:', errorMsg, result);
+      throw new Error(errorMsg);
+    }
+    
+    console.log('[saveProductRequest] Product saved successfully:', result);
+    return result as Product;
+  } catch (error) {
+    console.error('[saveProductRequest] Request failed:', error);
+    throw error;
+  }
 }
 async function saveProductStockRequest(
   token: string,
