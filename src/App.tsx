@@ -900,7 +900,7 @@ function App() {
       }
     };
     void refreshCatalog();
-    const interval = window.setInterval(() => { void refreshCatalog(); }, 5000);
+    const interval = window.setInterval(() => { void refreshCatalog(); }, 60000); // Refresh every 60 seconds
     const refreshWhenVisible = () => {
       if (document.visibilityState === "visible") void refreshCatalog();
     };
