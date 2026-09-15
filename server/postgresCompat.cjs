@@ -33,26 +33,64 @@ function runAsyncToSync(asyncFn) {
   let done = false;
   let result;
   let error;
+  let timeout = false;
+
+  // Set a timeout to prevent infinite blocking
+  const timeoutHandle = setTimeout(() => {
+    timeout = true;
+    done = true;
+    error = new Error('Database query timeout after 30 seconds');
+  }, 30000);
 
   asyncFn()
     .then((value) => {
-      result = value;
-      done = true;
+      if (!timeout) {
+        clearTimeout(timeoutHandle);
+        result = value;
+        done = true;
+      }
     })
     .catch((err) => {
-      error = err;
-      done = true;
+      if (!timeout) {
+        clearTimeout(timeoutHandle);
+        error = err;
+        done = true;
+      }
     });
 
-  deasync.loopWhile(() => !done);
+  // Use setImmediate to allow other operations to proceed
+  const startTime = Date.now();
+  while (!done) {
+    deasync.sleep(10); // Sleep 10ms between checks instead of busy-waiting
+    
+    // Emergency break after 35 seconds
+    if (Date.now() - startTime > 35000) {
+      clearTimeout(timeoutHandle);
+      throw new Error('Database query emergency timeout');
+    }
+  }
 
   if (error) throw error;
   return result;
 }
 
 function createPgCompatDatabase(config) {
-  const pool = new Pool(config);
+  const pool = new Pool({
+    ...config,
+    // Better connection pool settings for production
+    max: config.max || 10,
+    idleTimeoutMillis: config.idleTimeoutMillis || 30000,
+    connectionTimeoutMillis: config.connectionTimeoutMillis || 10000,
+    // Prevent connection exhaustion
+    allowExitOnIdle: false,
+  });
+  
   let transactionClient = null;
+
+  // Handle pool errors
+  pool.on('error', (err) => {
+    console.error('[PostgreSQL] Unexpected pool error:', err);
+  });
 
   const getTarget = () => {
     if (transactionClient) return transactionClient;
@@ -87,8 +125,18 @@ function createPgCompatDatabase(config) {
 
     const normalizedSql = toPostgresSql(sql);
     const target = getTarget();
-    const result = await target.query(normalizedSql, params);
-    return result;
+    
+    try {
+      const result = await target.query(normalizedSql, params);
+      return result;
+    } catch (err) {
+      console.error('[PostgreSQL] Query error:', {
+        sql: normalizedSql.substring(0, 200),
+        params: params.length,
+        error: err.message
+      });
+      throw err;
+    }
   }
 
   return {
