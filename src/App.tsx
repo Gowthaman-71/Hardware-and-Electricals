@@ -989,7 +989,7 @@ function App() {
       
       // Restore full cart by matching product IDs
       const restoredCart = minimalCart
-        .map((item: any) => {
+        .map((item: { productId: number; quantity: number }) => {
           const product = products.find(p => p.id === item.productId);
           return product ? { product, quantity: item.quantity || 1 } : null;
         })
@@ -1674,6 +1674,93 @@ function ProductsPage({
     </main>
   );
 }
+// Reusable quantity input component with proper string state
+function QuantityInput({
+  initialQuantity,
+  stock,
+  onChange,
+  onFocus,
+  disabled,
+  style,
+}: {
+  initialQuantity: number;
+  stock: number;
+  onChange: (quantity: number) => void;
+  onFocus?: () => void;
+  disabled?: boolean;
+  style?: React.CSSProperties;
+}) {
+  const [inputValue, setInputValue] = useState(String(initialQuantity));
+  const [isFocused, setIsFocused] = useState(false);
+  
+  // Sync with external quantity changes only when not focused
+  useEffect(() => {
+    if (!isFocused) {
+      setInputValue(String(initialQuantity));
+    }
+  }, [initialQuantity, isFocused]);
+  
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    
+    // Allow empty temporarily while typing
+    if (value === "") {
+      setInputValue("");
+      return;
+    }
+    
+    // Only allow positive integers
+    if (!/^\d+$/.test(value)) {
+      return;
+    }
+    
+    // Remove leading zeros
+    const normalized = value.replace(/^0+/, "") || "0";
+    setInputValue(normalized);
+    
+    // Update cart quantity immediately with validation
+    const numValue = parseInt(normalized, 10);
+    if (numValue >= 1) {
+      onChange(Math.min(numValue, stock || 9999));
+    }
+  };
+  
+  const handleBlur = () => {
+    setIsFocused(false);
+    
+    // On blur, ensure we have a valid quantity
+    if (inputValue === "" || parseInt(inputValue, 10) < 1) {
+      setInputValue(String(initialQuantity || 1));
+      onChange(initialQuantity || 1);
+    } else {
+      const finalQty = Math.min(parseInt(inputValue, 10), stock || 9999);
+      setInputValue(String(finalQty));
+      onChange(finalQty);
+    }
+  };
+  
+  const handleFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+    setIsFocused(true);
+    // Select all on focus for easy replacement
+    e.target.select();
+    onFocus?.();
+  };
+  
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      value={inputValue}
+      onChange={handleChange}
+      onBlur={handleBlur}
+      onFocus={handleFocus}
+      disabled={disabled}
+      style={style}
+      aria-label="Quantity"
+    />
+  );
+}
+
 function ProductCard({
   product,
   quantity,
@@ -1691,9 +1778,16 @@ function ProductCard({
   const unavailable = product.stock === 0;
   
   const handleAddToCart = () => {
-    // Add the item with the specified quantity
-    for (let i = 0; i < inputQuantity; i++) {
+    // Use addToCart and then setCartQuantity to set the correct amount
+    if (inputQuantity === 1) {
       addToCart(product);
+    } else {
+      // Add first item
+      addToCart(product);
+      // Then set to desired quantity
+      setTimeout(() => {
+        setCartQuantity(product, inputQuantity);
+      }, 0);
     }
     setInputQuantity(1); // Reset to 1 after adding
   };
@@ -1735,15 +1829,10 @@ function ProductCard({
           />
         ) : (
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            <input
-              type="number"
-              min="1"
-              max={product.stock || 9999}
-              value={inputQuantity}
-              onChange={(e) => {
-                const val = parseInt(e.target.value) || 1;
-                setInputQuantity(Math.max(1, Math.min(product.stock || 9999, val)));
-              }}
+            <QuantityInput
+              initialQuantity={inputQuantity}
+              stock={product.stock || 9999}
+              onChange={setInputQuantity}
               disabled={unavailable}
               style={{
                 width: '70px',
@@ -1753,7 +1842,6 @@ function ProductCard({
                 textAlign: 'center',
                 fontSize: '14px'
               }}
-              placeholder="Qty"
             />
             <button
               className="add-button"
@@ -1791,13 +1879,18 @@ function QuantityControl({
       >
         −
       </button>
-      <input
-        type="number"
-        min="1"
-        max={product.stock}
-        aria-label={`${product.name} quantity`}
-        value={quantity}
-        onChange={(event) => setQuantity(product, Number(event.target.value))}
+      <QuantityInput
+        initialQuantity={quantity}
+        stock={product.stock}
+        onChange={(newQty) => setQuantity(product, newQty)}
+        style={{
+          width: '60px',
+          textAlign: 'center',
+          border: 'none',
+          background: 'transparent',
+          fontSize: 'inherit',
+          padding: '0'
+        }}
       />
       <button
         type="button"
@@ -1970,18 +2063,14 @@ function Cart({
                   >
                     −
                   </button>
-                  <input
-                    type="number"
-                    min="1"
-                    max={product.stock || 9999}
-                    value={quantity}
-                    onChange={(e) => {
-                      const newQty = parseInt(e.target.value) || 1;
-                      const validQty = Math.max(1, Math.min(product.stock || 9999, newQty));
+                  <QuantityInput
+                    initialQuantity={quantity}
+                    stock={product.stock || 9999}
+                    onChange={(newQty) => {
                       setCart(
                         items.map((item) =>
                           item.product.id === product.id
-                            ? { ...item, quantity: validQty }
+                            ? { ...item, quantity: newQty }
                             : item,
                         ),
                       );
