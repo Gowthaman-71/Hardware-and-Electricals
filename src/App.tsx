@@ -133,29 +133,99 @@ function DynamicCategoryManager({
         product.categoryId === category.id ||
         product.category === category.name,
     ).length;
-    if (
-      !window.confirm(
-        `${count ? `Archive ${category.name}?\n\nThis category contains ${count} product${count === 1 ? "" : "s"}.` : `Delete ${category.name}?`}\n\nThis action cannot be undone.`,
-      )
-    )
+    
+    if (count > 0) {
+      // Show reassignment dialog
+      const otherCategories = categories.filter(c => 
+        c.id !== category.id && 
+        c.status !== "ARCHIVED" && 
+        c.active !== false
+      );
+      
+      if (otherCategories.length === 0) {
+        notify("Cannot delete the last active category");
+        return;
+      }
+      
+      const reassign = window.confirm(
+        `${category.name} contains ${count} product${count === 1 ? "" : "s"}.\n\nClick OK to move products to another category, or Cancel to just archive the category.`
+      );
+      
+      if (reassign) {
+        // Show category selection
+        const targetCategoryName = prompt(
+          `Move ${count} product${count === 1 ? "" : "s"} to which category?\n\nAvailable categories:\n${otherCategories.map(c => `- ${c.name}`).join('\n')}\n\nEnter category name:`
+        );
+        
+        if (!targetCategoryName) return; // User cancelled
+        
+        const targetCategory = otherCategories.find(
+          c => c.name.toLowerCase() === targetCategoryName.toLowerCase()
+        );
+        
+        if (!targetCategory) {
+          notify(`Category "${targetCategoryName}" not found`);
+          return;
+        }
+        
+        const response = await fetchWithTimeout(`/api/categories/${category.id}/archive`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiToken}`,
+          },
+          body: JSON.stringify({ reassignToCategoryId: targetCategory.id }),
+        });
+        
+        if (!response.ok) {
+          notify("Unable to reassign and archive category");
+          return;
+        }
+        
+        const result = await response.json();
+        
+        // Refresh categories and products
+        const refreshed = await fetchWithTimeout(`/api/categories`, {
+          headers: { Authorization: `Bearer ${apiToken}` },
+        });
+        if (refreshed.ok) {
+          setCategories(await refreshed.json());
+        }
+        
+        notify(result.message || "Category archived and products reassigned");
+        return;
+      }
+    }
+    
+    // Archive without reassignment or delete if no products
+    if (count > 0 && !window.confirm(`Archive ${category.name}?\n\nProducts will remain in this category but it will be hidden from customers.`)) {
       return;
+    }
+    
+    if (count === 0 && !window.confirm(`Delete ${category.name}?\n\nThis action cannot be undone.`)) {
+      return;
+    }
+    
     const response = await fetchWithTimeout(`/api/categories/${category.id}/archive`, {
       method: "PATCH",
       headers: { Authorization: `Bearer ${apiToken}` },
     });
-    if (!response.ok) return notify("Unable to archive category");
+    
+    if (!response.ok) {
+      notify("Unable to archive category");
+      return;
+    }
+    
     const result = await response.json();
-    // Backend returns {archived: true, ...} or {deleted: true, ...}
+    
     if (result.archived) {
-      // Category was archived (has products) - refresh from server to get updated status
       const refreshed = await fetchWithTimeout(`/api/categories`, {
         headers: { Authorization: `Bearer ${apiToken}` },
       });
       if (refreshed.ok) {
-        const allCategories = await refreshed.json();
-        setCategories(allCategories);
+        setCategories(await refreshed.json());
       }
-      notify("Category archived (contains products)");
+      notify("Category archived");
     } else if (result.deleted) {
       setCategories(categories.filter((item) => item.id !== category.id));
       notify("Category deleted");
@@ -583,6 +653,7 @@ type CategoryAttribute = {
   name: string;
   type: AttributeType;
   values: string[];
+  required?: boolean;
 };
 type Product = {
   id: number;
@@ -591,11 +662,15 @@ type Product = {
   category: string;
   categoryId?: number;
   brand: string;
+  brandId?: number;
+  productType?: string;
+  productTypeId?: number;
   price: number;
   mrp: number;
   stock: number;
   unit: string;
   image: string;
+  imageUrls?: string[];
   description: string;
   details: string;
   attributes?: Record<string, string | string[]>;
@@ -856,14 +931,18 @@ async function saveProductRequest(
     sku: product.code.trim(), 
     name: product.name.trim(), 
     categoryId, 
+    brandId: product.brandId || null,
     brand: product.brand || '', 
+    productTypeId: product.productTypeId || null,
     description: product.description || '', 
     details: product.details || '', 
     price: product.price, 
     mrp: product.mrp || product.price, 
+    discount: product.mrp && product.price ? Math.round(((product.mrp - product.price) / product.mrp) * 100) : 0,
     stock: sanitizedStock, 
     unit: product.unit, 
     imageUrl: product.image || null, 
+    imageUrls: Array.isArray(product.imageUrls) ? product.imageUrls : [],
     attributes: product.attributes || {}, 
     status: product.status === "Inactive" ? "INACTIVE" : "ACTIVE" 
   };
@@ -2255,6 +2334,8 @@ type ImportItem = {
   raw: Record<string, string>;
   product: Product;
 };
+// @ts-expect-error -- kept for potential future use; no longer called after server-side pagination refactor
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function importCsv(
   event: ChangeEvent<HTMLInputElement>,
   categories: Category[],
@@ -2296,19 +2377,23 @@ function makeProduct(
   const value = (name: string) => raw[headerKey(name)] || "";
   const valueAny = (...names: string[]) => names.map((name) => value(name)).find(Boolean) || "";
   const category = value("Category");
+  const productTypeName = valueAny("Product Type", "Type", "Subcategory");
+  const brandName = value("Brand");
+  
   return {
     id: Date.now() + row,
     name: value("Product Name"),
     code: value("SKU") || value("Product Code"),
     category,
-    brand: value("Brand"),
+    brand: brandName,
+    productType: productTypeName,
     price: Number(valueAny("Price", "Price (₹)", "Price ₹")),
     mrp: Number(valueAny("MRP", "MRP (₹)")) || Number(valueAny("Price", "Price (₹)")),
     stock: Number(valueAny("Stock", "Stock Qty", "Stock Quantity", "Quantity")),
     unit: value("Unit") || "Nos",
     image: valueAny("Image URL", "Image 1"),
     description: value("Description"),
-    details: valueAny("Product Type", "Subcategory"),
+    details: valueAny("Details", "Specifications"),
     status:
       value("Status").toLowerCase() === "inactive" ? "Inactive" : "Active",
     attributes: Object.fromEntries(
@@ -2769,12 +2854,18 @@ function Admin({
 function emptyProduct(categories: Category[]): Product {
   // Filter to active categories only for new products
   const activeCategories = categories.filter(c => c.status !== "ARCHIVED" && c.active !== false);
+  const defaultCategory = activeCategories[0] || categories[0];
+  
   return {
     id: 0,
     name: "",
     code: "",
-    category: activeCategories[0]?.name || categories[0]?.name || "Electrical Switches",
+    category: defaultCategory?.name || "Electrical Switches",
+    categoryId: defaultCategory?.id,
     brand: "",
+    brandId: undefined,
+    productType: "",
+    productTypeId: undefined,
     price: 0,
     mrp: 0,
     stock: 0,
@@ -3256,101 +3347,124 @@ function AdminProducts({
   inventory: boolean;
 }) {
   const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("All");
   const [status, setStatus] = useState("All");
+  const [sortBy, setSortBy] = useState("created_at");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalCount, setTotalCount] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const PAGE_SIZE = 50;
   const [inlineStockDrafts, setInlineStockDrafts] = useState<Record<number, string>>({});
   const [savingStock, setSavingStock] = useState<Record<number, boolean>>({});
-  const visible = products.filter(
-    (p) =>
-      `${p.name} ${p.code} ${p.brand} ${p.category}`
-        .toLowerCase()
-        .includes(search.toLowerCase()) &&
-      (category === "All" || p.category === category) &&
-      (status === "All" || statusOf(p.stock) === status),
-  );
+
+  // Debounce search input
+  useEffect(() => {
+    const t = window.setTimeout(() => setSearch(searchInput), 350);
+    return () => window.clearTimeout(t);
+  }, [searchInput]);
+
+  // Reset to page 1 whenever filters change
+  useEffect(() => { setPage(1); }, [search, category, status, sortBy, sortOrder]);
+
+  // Server-side fetch
+  useEffect(() => {
+    if (!apiToken) return;
+    setLoading(true);
+    const params = new URLSearchParams();
+    params.set("page", String(page));
+    params.set("limit", String(PAGE_SIZE));
+    params.set("sortBy", sortBy);
+    params.set("sortOrder", sortOrder);
+    if (search) params.set("search", search);
+    if (category !== "All") {
+      const catObj = categories.find((c) => c.name === category);
+      if (catObj?.id) params.set("categoryId", String(catObj.id));
+    }
+    if (status === "Active")         params.set("status", "ACTIVE");
+    else if (status === "Inactive")  params.set("status", "INACTIVE");
+    else if (status === "Out of stock") params.set("status", "OUT_OF_STOCK");
+    else if (status === "Low stock") params.set("status", "LOW_STOCK");
+
+    fetchWithTimeout(`/api/admin/products?${params.toString()}`, {
+      headers: { Authorization: `Bearer ${apiToken}` },
+    })
+      .then((r) => (r.ok ? r.json() : { data: [], total: 0, pages: 1 }))
+      .then((result: { data: Product[]; total: number; pages: number }) => {
+        setProducts(result.data);
+        setTotalCount(result.total);
+        setTotalPages(result.pages);
+      })
+      .catch(() => notify("Unable to load products"))
+      .finally(() => setLoading(false));
+  }, [apiToken, search, category, status, sortBy, sortOrder, page]);
+
   const commitInlineStock = async (product: Product, rawValue: string) => {
     const trimmed = String(rawValue ?? "").trim();
     if (!trimmed) {
-      setInlineStockDrafts((current) => ({ ...current, [product.id]: String(product.stock) }));
+      setInlineStockDrafts((c) => ({ ...c, [product.id]: String(product.stock) }));
       return;
     }
     const stock = Number(trimmed);
     if (!Number.isInteger(stock) || stock < 0 || !Number.isFinite(stock)) {
-      setInlineStockDrafts((current) => ({ ...current, [product.id]: String(product.stock) }));
-      notify("Stock must be a whole number greater than or equal to 0.");
+      setInlineStockDrafts((c) => ({ ...c, [product.id]: String(product.stock) }));
+      notify("Stock must be a whole number >= 0.");
       return;
     }
     if (stock === product.stock) {
-      setInlineStockDrafts((current) => ({ ...current, [product.id]: String(stock) }));
+      setInlineStockDrafts((c) => ({ ...c, [product.id]: String(stock) }));
       return;
     }
     if (savingStock[product.id]) return;
-    setSavingStock((current) => ({ ...current, [product.id]: true }));
+    setSavingStock((c) => ({ ...c, [product.id]: true }));
     try {
       const saved = await saveProductStockRequest(apiToken, product.id, stock);
-      setProducts((current) => current.map((item) => (item.id === saved.id ? saved : item)));
-      setInlineStockDrafts((current) => ({ ...current, [product.id]: String(saved.stock) }));
+      setProducts((c) => c.map((item) => (item.id === saved.id ? saved : item)));
+      setInlineStockDrafts((c) => ({ ...c, [product.id]: String(saved.stock) }));
     } catch (reason) {
-      setInlineStockDrafts((current) => ({ ...current, [product.id]: String(product.stock) }));
-      notify(reason instanceof Error ? reason.message : "Unable to update stock. Please try again.");
+      setInlineStockDrafts((c) => ({ ...c, [product.id]: String(product.stock) }));
+      notify(reason instanceof Error ? reason.message : "Unable to update stock.");
     } finally {
-      setSavingStock((current) => ({ ...current, [product.id]: false }));
+      setSavingStock((c) => ({ ...c, [product.id]: false }));
     }
   };
+
   const save = async (product: Product) => {
-    try {
-      console.log('[AdminProducts] Saving product:', product);
-      const saved = await saveProductRequest(apiToken, product, categories);
-      console.log('[AdminProducts] Product saved successfully:', saved);
-      setProducts(
-        product.id
-          ? products.map((item) => (item.id === saved.id ? saved : item))
-          : [saved, ...products],
-      );
-      setEditing(null);
-      notify(product.id ? "Product updated successfully" : "Product added successfully");
-    } catch (reason) {
-      console.error('[AdminProducts] Save error:', reason);
-      notify(reason instanceof Error ? reason.message : "Unable to save product. Please try again.");
-      throw reason; // Re-throw so the form can handle it
-    }
+    const saved = await saveProductRequest(apiToken, product, categories);
+    setProducts((c) =>
+      product.id ? c.map((item) => (item.id === saved.id ? saved : item)) : [saved, ...c],
+    );
+    setEditing(null);
+    notify(product.id ? "Product updated" : "Product added");
   };
+
   const remove = async (id: number) => {
-    if (
-      window.confirm(
-        "Delete Product?\n\nAre you sure you want to delete this product? This action cannot be undone.",
-      )
-    ) {
-      const response = await fetch(`/api/products/${id}/archive`, {
-        method: "PATCH",
-        headers: { Authorization: `Bearer ${apiToken}` },
-      });
-      if (!response.ok) {
-        notify("Unable to delete product. Please try again.");
-        return;
-      }
-      setProducts(products.filter((p) => p.id !== id));
-      notify("Product deleted");
-    }
+    if (!window.confirm("Delete this product? This cannot be undone.")) return;
+    const response = await fetchWithTimeout(`/api/products/${id}/archive`, {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${apiToken}` },
+    });
+    if (!response.ok) { notify("Unable to delete product."); return; }
+    setProducts((c) => c.filter((p) => p.id !== id));
+    setTotalCount((n) => Math.max(0, n - 1));
+    notify("Product deleted");
   };
+
   return (
     <>
       <div className="admin-topline">
         <div>
-          <p className="eyebrow">
-            CATALOGUE / {inventory ? "INVENTORY" : "PRODUCTS"}
-          </p>
+          <p className="eyebrow">CATALOGUE / {inventory ? "INVENTORY" : "PRODUCTS"}</p>
           <h1>
             {inventory ? "Inventory" : "Products"}{" "}
-            <span className="count-badge">{products.length}</span>
+            <span className="count-badge">{totalCount}</span>
           </h1>
           <p>Manage your store products and inventory.</p>
         </div>
-        <button
-          className="button blue"
-          onClick={() => setEditing(emptyProduct(categories))}
-        >
+        <button className="button blue" onClick={() => setEditing(emptyProduct(categories))}>
           + Add Product
         </button>
       </div>
@@ -3358,101 +3472,108 @@ function AdminProducts({
         <label className="search">
           <span>⌕</span>
           <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search name, code, SKU or brand"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Search name, SKU, brand, description"
           />
         </label>
         <select value={category} onChange={(e) => setCategory(e.target.value)}>
           <option>All</option>
-          {categories.map((c) => (
+          {categories.filter((c) => c.status !== "ARCHIVED").map((c) => (
             <option key={c.id}>{c.name}</option>
           ))}
         </select>
         <select value={status} onChange={(e) => setStatus(e.target.value)}>
           <option>All</option>
+          <option>Active</option>
+          <option>Inactive</option>
           <option>In stock</option>
           <option>Low stock</option>
           <option>Out of stock</option>
         </select>
-        <label className="import-button">
-          Import CSV
-          <input
-            type="file"
-            accept=".csv,text/csv"
-            onChange={(e) =>
-              importCsv(e, categories, products, setProducts, notify)
-            }
-          />
-        </label>
+        <select
+          value={`${sortBy}:${sortOrder}`}
+          onChange={(e) => {
+            const [by, order] = e.target.value.split(":");
+            setSortBy(by);
+            setSortOrder(order as "asc" | "desc");
+          }}
+        >
+          <option value="created_at:desc">Newest first</option>
+          <option value="created_at:asc">Oldest first</option>
+          <option value="name:asc">Name A-Z</option>
+          <option value="name:desc">Name Z-A</option>
+          <option value="price:asc">Price low-high</option>
+          <option value="price:desc">Price high-low</option>
+          <option value="stock:asc">Stock low-high</option>
+          <option value="stock:desc">Stock high-low</option>
+        </select>
       </div>
+      {loading && <p style={{ padding: "12px 0", opacity: 0.6 }}>Loading products...</p>}
       <div className="product-table">
         <div className="table-head">
           <span>PRODUCT</span>
           <span>CATEGORY</span>
+          <span>BRAND / TYPE</span>
           <span>PRICE</span>
           <span>STOCK</span>
           <span>STATUS</span>
           <span>ACTIONS</span>
         </div>
-        {visible.map((p) => (
+        {products.map((p) => (
           <div className="table-row" key={p.id}>
             <span className="table-product">
               <img src={p.image || fallbackImage} alt="" />
               <strong>
                 {p.name}
-                <small>
-                  {p.brand} · {p.code}
-                </small>
+                <small>{p.code}</small>
               </strong>
             </span>
             <span>{p.category}</span>
-            <span>{money(p.price)}</span>
+            <span>
+              {p.brand || "—"}
+              {p.productType ? (
+                <small style={{ display: "block", opacity: 0.7 }}>{p.productType}</small>
+              ) : null}
+            </span>
+            <span>
+              {money(p.price)}
+              {p.mrp > p.price ? (
+                <small style={{ display: "block", opacity: 0.6 }}>
+                  <del>{money(p.mrp)}</del>
+                </small>
+              ) : null}
+            </span>
             <span>
               <input
                 className="stock-input"
                 type="number"
                 min="0"
                 value={inlineStockDrafts[p.id] ?? String(p.stock)}
-                onFocus={() => {
-                  setInlineStockDrafts((current) => ({
-                    ...current,
-                    [p.id]: current[p.id] ?? String(p.stock),
-                  }));
-                }}
+                onFocus={() =>
+                  setInlineStockDrafts((c) => ({ ...c, [p.id]: c[p.id] ?? String(p.stock) }))
+                }
                 onClick={(e) => {
-                  if (document.activeElement !== e.currentTarget) return;
-                  e.currentTarget.select();
+                  if (document.activeElement === e.currentTarget) e.currentTarget.select();
                 }}
-                onChange={(e) => {
-                  const nextValue = e.target.value;
-                  setInlineStockDrafts((current) => ({
-                    ...current,
-                    [p.id]: nextValue,
-                  }));
-                }}
-                onBlur={(e) => {
-                  void commitInlineStock(p, e.currentTarget.value);
-                }}
+                onChange={(e) =>
+                  setInlineStockDrafts((c) => ({ ...c, [p.id]: e.target.value }))
+                }
+                onBlur={(e) => void commitInlineStock(p, e.currentTarget.value)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     e.preventDefault();
                     void commitInlineStock(p, e.currentTarget.value);
                   }
                   if (e.key === "Escape") {
-                    setInlineStockDrafts((current) => ({
-                      ...current,
-                      [p.id]: String(p.stock),
-                    }));
+                    setInlineStockDrafts((c) => ({ ...c, [p.id]: String(p.stock) }));
                   }
                 }}
               />{" "}
               {p.unit}
             </span>
             <span className="status-text">
-              <i
-                className={p.stock === 0 ? "red" : p.stock < 10 ? "yellow" : ""}
-              />
+              <i className={p.stock === 0 ? "red" : p.stock < 10 ? "yellow" : ""} />
               {statusOf(p.stock)}
             </span>
             <span className="row-actions">
@@ -3467,13 +3588,44 @@ function AdminProducts({
                   })
                 }
               >
-                Duplicate
+                Dupe
               </button>
-              <button onClick={() => remove(p.id)}>Delete</button>
+              <button onClick={() => void remove(p.id)}>Delete</button>
             </span>
           </div>
         ))}
+        {!loading && products.length === 0 && (
+          <p style={{ padding: "24px 0", opacity: 0.6 }}>No products found.</p>
+        )}
       </div>
+      {totalPages > 1 && (
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            alignItems: "center",
+            padding: "16px 0",
+          }}
+        >
+          <button
+            className="plain-button"
+            disabled={page === 1}
+            onClick={() => setPage((n) => Math.max(1, n - 1))}
+          >
+            Prev
+          </button>
+          <span style={{ opacity: 0.7 }}>
+            Page {page} of {totalPages} ({totalCount} products)
+          </span>
+          <button
+            className="plain-button"
+            disabled={page >= totalPages}
+            onClick={() => setPage((n) => Math.min(totalPages, n + 1))}
+          >
+            Next
+          </button>
+        </div>
+      )}
       {editing && (
         <ProductForm
           product={editing}
@@ -3485,6 +3637,26 @@ function AdminProducts({
     </>
   );
 }
+
+type Brand = {
+  id: number;
+  name: string;
+  slug: string;
+  logoUrl: string | null;
+  description: string;
+  status: string;
+  productCount?: number;
+};
+
+type ProductType = {
+  id: number;
+  categoryId: number;
+  name: string;
+  status: string;
+  sortOrder: number;
+  productCount?: number;
+};
+
 function ProductForm({
   product,
   categories,
@@ -3499,13 +3671,92 @@ function ProductForm({
   const [form, setForm] = useState(product);
   const [advanced, setAdvanced] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [brands, setBrands] = useState<Brand[]>([]);
+  const [productTypes, setProductTypes] = useState<ProductType[]>([]);
+  const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
+  
+  // Load brands on mount and when needed
+  useEffect(() => {
+    if (!apiToken) return;
+    fetch('/api/brands', {
+      headers: { Authorization: `Bearer ${apiToken}` },
+    })
+      .then(res => res.ok ? res.json() : [])
+      .then((data: Brand[]) => setBrands(data))
+      .catch(() => setBrands([]));
+  }, [apiToken]);
+  
+  const selectedCategory = categories.find(c => c.name === form.category);
+  const selectedCategoryId = selectedCategory?.id;
+  
+  // Load product types when category changes
+  useEffect(() => {
+    if (!apiToken || !selectedCategoryId) return;
+    fetch(`/api/product-types?categoryId=${selectedCategoryId}`, {
+      headers: { Authorization: `Bearer ${apiToken}` },
+    })
+      .then(res => res.ok ? res.json() : [])
+      .then((data: ProductType[]) => setProductTypes(data))
+      .catch(() => setProductTypes([]));
+  }, [apiToken, selectedCategoryId]);
+  
+  // Get category attributes for dynamic form fields
+  const categoryAttributes = selectedCategory?.attributes || [];
+  const productAttributes = form.attributes || {};
+  
+  const updateAttribute = (attributeName: string, value: string | string[]) => {
+    setForm(prev => ({
+      ...prev,
+      attributes: {
+        ...prev.attributes,
+        [attributeName]: value
+      }
+    }));
+  };
+  
+  // Load product types when category changes
+  useEffect(() => {
+    if (!apiToken || !selectedCategoryId) return;
+    fetch(`/api/product-types?categoryId=${selectedCategoryId}`, {
+      headers: { Authorization: `Bearer ${apiToken}` },
+    })
+      .then(res => res.ok ? res.json() : [])
+      .then((data: ProductType[]) => setProductTypes(data))
+      .catch(() => setProductTypes([]));
+  }, [apiToken, selectedCategoryId]);
+  
   const update = (key: keyof Product, value: string | number) =>
     setForm({ ...form, [key]: value });
-  const upload = (file?: File) => {
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => update("image", String(reader.result));
-    reader.readAsDataURL(file);
+    
+  const upload = async (file?: File) => {
+    if (!file || !apiToken) return;
+    
+    setUploading(true);
+    const formData = new FormData();
+    formData.append('image', file);
+    
+    try {
+      const response = await fetch('/api/images', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiToken}` },
+        body: formData,
+      });
+      
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ error: 'Upload failed' }));
+        alert(error.error || 'Failed to upload image');
+        return;
+      }
+      
+      const result = await response.json() as { url: string };
+      setForm({ ...form, image: result.url });
+    } catch (error) {
+      console.error('[ProductForm] Upload error:', error);
+      alert('Failed to upload image. Please try again.');
+    } finally {
+      setUploading(false);
+    }
   };
   return (
     <div className="form-overlay">
@@ -3544,12 +3795,13 @@ function ProductForm({
         <label className="dropzone">
           {form.image && <img src={form.image} alt="Product preview" />}
           <strong>
-            {form.image ? "Replace Product Image" : "Upload Product Image"}
+            {uploading ? "Uploading..." : form.image ? "Replace Product Image" : "Upload Product Image"}
           </strong>
-          <small>Click to upload · JPG or PNG up to 10MB</small>
+          <small>Click to upload · JPG, PNG, WebP or GIF up to 10MB</small>
           <input
             type="file"
-            accept="image/*"
+            accept="image/jpeg,image/jpg,image/png,image/webp,image/gif"
+            disabled={uploading}
             onChange={(e) => upload(e.target.files?.[0])}
           />
         </label>
@@ -3564,29 +3816,86 @@ function ProductForm({
             />
           </label>
           <label>
-            Product Code *
+            Product Code / SKU *
             <input
               value={form.code}
               onChange={(e) => update("code", e.target.value)}
-              placeholder="Enter product code"
+              placeholder="Enter product code or SKU"
+              pattern="[A-Za-z0-9_-]+"
+              title="Only letters, numbers, dashes and underscores allowed"
+              required
             />
           </label>
           <label>
             Category *
             <select
               value={form.category}
-              onChange={(e) => update("category", e.target.value)}
+              onChange={(e) => {
+                const newCategory = e.target.value;
+                const categoryObj = categories.find(c => c.name === newCategory);
+                update("category", newCategory);
+                // Clear product type when category changes since types are category-specific
+                setForm(prev => ({ 
+                  ...prev, 
+                  category: newCategory, 
+                  categoryId: categoryObj?.id,
+                  productType: '',
+                  productTypeId: undefined
+                }));
+              }}
+              required
             >
               {categories.filter(c => c.status !== "ARCHIVED" && c.active !== false).map((c) => (
-                <option key={c.id}>{c.name}</option>
+                <option key={c.id} value={c.name}>{c.name}</option>
               ))}
+            </select>
+          </label>
+          <label>
+            Brand
+            <select
+              value={form.brand || ''}
+              onChange={(e) => update("brand", e.target.value)}
+            >
+              <option value="">Select brand (optional)</option>
+              {brands
+                .filter(b => b.status !== 'ARCHIVED')
+                .map((b) => (
+                  <option key={b.id} value={b.name}>
+                    {b.name} {b.productCount ? `(${b.productCount})` : ''}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label>
+            Product Type
+            <select
+              value={form.productTypeId || ''}
+              onChange={(e) => {
+                const selectedId = e.target.value ? Number(e.target.value) : undefined;
+                const selectedType = productTypes.find(pt => pt.id === selectedId);
+                setForm(prev => ({
+                  ...prev,
+                  productTypeId: selectedId,
+                  productType: selectedType?.name || ''
+                }));
+              }}
+            >
+              <option value="">Select type (optional)</option>
+              {productTypes
+                .filter(pt => pt.status !== 'ARCHIVED')
+                .map((pt) => (
+                  <option key={pt.id} value={pt.id}>
+                    {pt.name} {pt.productCount ? `(${pt.productCount})` : ''}
+                  </option>
+                ))}
             </select>
           </label>
           <label>
             Selling Price *
             <input
               type="number"
-              min="1"
+              min="0"
+              step="0.01"
               value={form.price || ""}
               onChange={(e) => update("price", Number(e.target.value))}
               placeholder="₹ Enter price"
@@ -3594,12 +3903,14 @@ function ProductForm({
             />
           </label>
           <label>
-            Stock Quantity
+            Stock Quantity *
             <input
               type="number"
               min="0"
+              step="1"
               value={form.stock}
               onChange={(e) => update("stock", Number(e.target.value))}
+              required
             />
           </label>
           <label>
@@ -3614,6 +3925,8 @@ function ProductForm({
               <option>Set</option>
               <option>Meter</option>
               <option>Kg</option>
+              <option>Liter</option>
+              <option>Pair</option>
               <option>Other</option>
             </select>
           </label>
@@ -3628,18 +3941,26 @@ function ProductForm({
         {advanced && (
           <div className="advanced-fields">
             <label>
-              Brand
+              MRP (Maximum Retail Price)
               <input
-                value={form.brand}
-                onChange={(e) => update("brand", e.target.value)}
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.mrp || ""}
+                onChange={(e) => update("mrp", Number(e.target.value))}
+                placeholder="Must be equal to or greater than selling price"
               />
             </label>
             <label>
-              MRP
+              Discount (%)
               <input
                 type="number"
-                value={form.mrp || ""}
-                onChange={(e) => update("mrp", Number(e.target.value))}
+                min="0"
+                max="100"
+                step="0.01"
+                value={form.mrp && form.price ? Math.round(((form.mrp - form.price) / form.mrp) * 100) : ""}
+                readOnly
+                placeholder="Calculated from MRP and price"
               />
             </label>
             <label>
@@ -3647,23 +3968,112 @@ function ProductForm({
               <textarea
                 value={form.description}
                 onChange={(e) => update("description", e.target.value)}
+                placeholder="Short product description for customers"
+                rows={3}
               />
             </label>
             <label>
-              Specifications
-              <input
+              Specifications / Details
+              <textarea
                 value={form.details}
                 onChange={(e) => update("details", e.target.value)}
+                placeholder="Technical specifications, features, or additional details"
+                rows={3}
               />
             </label>
+            <label>
+              Status
+              <select
+                value={form.status || 'Active'}
+                onChange={(e) => update("status", e.target.value as "Active" | "Inactive")}
+              >
+                <option value="Active">Active</option>
+                <option value="Inactive">Inactive</option>
+              </select>
+            </label>
           </div>
+        )}
+        {categoryAttributes.length > 0 && (
+          <>
+            <h3>Category Attributes</h3>
+            <div className="attributes-grid">
+              {categoryAttributes.map((attr) => (
+                <label key={attr.id}>
+                  {attr.name} {attr.required ? "*" : ""}
+                  {attr.type === 'Dropdown' || attr.type === 'Radio Button' ? (
+                    <select
+                      value={String(productAttributes[attr.name] || '')}
+                      onChange={(e) => updateAttribute(attr.name, e.target.value)}
+                      required={attr.required}
+                    >
+                      <option value="">Select {attr.name}</option>
+                      {attr.values.map((value) => (
+                        <option key={value} value={value}>
+                          {value}
+                        </option>
+                      ))}
+                    </select>
+                  ) : attr.type === 'Multi-select' ? (
+                    <select
+                      multiple
+                      value={Array.isArray(productAttributes[attr.name]) ? productAttributes[attr.name] as string[] : []}
+                      onChange={(e) => {
+                        const values = Array.from(e.target.selectedOptions, option => option.value);
+                        updateAttribute(attr.name, values);
+                      }}
+                      required={attr.required}
+                    >
+                      {attr.values.map((value) => (
+                        <option key={value} value={value}>
+                          {value}
+                        </option>
+                      ))}
+                    </select>
+                  ) : attr.type === 'Boolean / Yes-No' ? (
+                    <select
+                      value={String(productAttributes[attr.name] || '')}
+                      onChange={(e) => updateAttribute(attr.name, e.target.value)}
+                      required={attr.required}
+                    >
+                      <option value="">Select</option>
+                      <option value="Yes">Yes</option>
+                      <option value="No">No</option>
+                    </select>
+                  ) : attr.type === 'Number' ? (
+                    <input
+                      type="number"
+                      value={String(productAttributes[attr.name] || '')}
+                      onChange={(e) => updateAttribute(attr.name, e.target.value)}
+                      required={attr.required}
+                      placeholder={`Enter ${attr.name.toLowerCase()}`}
+                    />
+                  ) : attr.type === 'Color' ? (
+                    <input
+                      type="color"
+                      value={String(productAttributes[attr.name] || '#000000')}
+                      onChange={(e) => updateAttribute(attr.name, e.target.value)}
+                      required={attr.required}
+                    />
+                  ) : (
+                    <input
+                      type="text"
+                      value={String(productAttributes[attr.name] || '')}
+                      onChange={(e) => updateAttribute(attr.name, e.target.value)}
+                      required={attr.required}
+                      placeholder={`Enter ${attr.name.toLowerCase()}`}
+                    />
+                  )}
+                </label>
+              ))}
+            </div>
+          </>
         )}
         <div className="form-actions">
           <button type="button" className="text-button" onClick={onClose}>
             Cancel
           </button>
-          <button className="button blue" type="submit" disabled={saving}>
-            {saving ? "Saving..." : product.id ? "Save Changes" : "Save Product"} ↗
+          <button className="button blue" type="submit" disabled={saving || uploading}>
+            {saving ? "Saving..." : uploading ? "Uploading..." : product.id ? "Save Changes" : "Save Product"} ↗
           </button>
         </div>
       </form>
