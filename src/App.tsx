@@ -1687,7 +1687,17 @@ function ProductCard({
   addToCart: (p: Product) => void;
   setCartQuantity: (p: Product, quantity: number) => void;
 }) {
+  const [inputQuantity, setInputQuantity] = useState(1);
   const unavailable = product.stock === 0;
+  
+  const handleAddToCart = () => {
+    // Add the item with the specified quantity
+    for (let i = 0; i < inputQuantity; i++) {
+      addToCart(product);
+    }
+    setInputQuantity(1); // Reset to 1 after adding
+  };
+  
   return (
     <article className="product-card">
       <button
@@ -1724,14 +1734,37 @@ function ProductCard({
             setQuantity={setCartQuantity}
           />
         ) : (
-          <button
-            className="add-button"
-            disabled={unavailable}
-            onClick={() => addToCart(product)}
-          >
-            {unavailable ? "Out of stock" : "Add to cart"}{" "}
-            <b>{unavailable ? "−" : "+"}</b>
-          </button>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <input
+              type="number"
+              min="1"
+              max={product.stock || 9999}
+              value={inputQuantity}
+              onChange={(e) => {
+                const val = parseInt(e.target.value) || 1;
+                setInputQuantity(Math.max(1, Math.min(product.stock || 9999, val)));
+              }}
+              disabled={unavailable}
+              style={{
+                width: '70px',
+                padding: '8px',
+                border: '1px solid #ddd',
+                borderRadius: '4px',
+                textAlign: 'center',
+                fontSize: '14px'
+              }}
+              placeholder="Qty"
+            />
+            <button
+              className="add-button"
+              disabled={unavailable}
+              onClick={handleAddToCart}
+              style={{ flex: 1 }}
+            >
+              {unavailable ? "Out of stock" : "Add to cart"}{" "}
+              <b>{unavailable ? "−" : "+"}</b>
+            </button>
+          </div>
         )}
       </div>
     </article>
