@@ -1151,10 +1151,15 @@ function App() {
   };
   const setCartQuantity = (product: Product, quantity: number) => {
     if (!product.stock) return;
-    const nextQuantity = Math.max(
-      1,
-      Math.min(product.stock, Math.floor(quantity) || 1),
-    );
+    
+    // If quantity is 0 or less, remove item from cart
+    if (quantity <= 0) {
+      setCart((items) => items.filter((item) => item.product.id !== product.id));
+      return;
+    }
+    
+    // Otherwise, update quantity (cap at stock level)
+    const nextQuantity = Math.min(product.stock, Math.floor(quantity) || 1);
     setCart((items) =>
       items.map((item) =>
         item.product.id === product.id
@@ -4028,87 +4033,46 @@ function Account({
   }, []);
   const saveAddress = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    setMessage(""); // Clear previous messages
-    
-    try {
-      const form = new FormData(event.currentTarget);
-      const payloadEntries = Array.from(form.entries()).map(([key, value]) => [
-        key,
-        typeof value === 'string' ? value : String(value),
-      ]);
-      const payload = Object.fromEntries(payloadEntries);
-      
-      const normalized = {
-        type: String(payload.type || "Home").trim() || "Home",
-        fullName: String(
-          payload.fullName ?? payload.full_name ?? customer?.name ?? "",
-        ).trim(),
-        phone: String(payload.phone ?? "").trim(),
-        gstNumber: String(payload.gstNumber ?? "").trim() || null,
-        addressLine1: String(
-          payload.addressLine1 ?? payload.address_line1 ?? "",
-        ).trim(),
-        addressLine2: String(
-          payload.addressLine2 ?? payload.address_line2 ?? "",
-        ).trim() || null,
-        area: String(payload.area ?? "").trim() || null,
-        city: String(payload.city ?? "").trim(),
-        state: String(payload.state ?? "").trim(),
-        pincode: String(payload.pincode ?? "").trim(),
-        isDefault: form.get("isDefault") === "on" || Boolean(payload.isDefault),
-      };
-      
-      // Validate required fields
-      if (!normalized.fullName) {
-        setMessage("Full name is required");
-        return;
-      }
-      if (!normalized.phone) {
-        setMessage("Phone number is required");
-        return;
-      }
-      if (!normalized.addressLine1) {
-        setMessage("Address line 1 is required");
-        return;
-      }
-      if (!normalized.city) {
-        setMessage("City is required");
-        return;
-      }
-      if (!normalized.state) {
-        setMessage("State is required");
-        return;
-      }
-      if (!normalized.pincode) {
-        setMessage("Pincode is required");
-        return;
-      }
-      
-      console.log('[saveAddress] Sending payload:', normalized);
-      
-      const response = await fetch(
-        editing?.id ? `/api/me/addresses/${editing.id}` : "/api/me/addresses",
-        {
-          method: editing?.id ? "PATCH" : "POST",
-          headers: { ...headers, "Content-Type": "application/json" },
-          body: JSON.stringify(normalized),
-        },
-      );
-      
-      console.log('[saveAddress] Response status:', response.status);
-      
-      if (response.ok) {
-        setEditing(null);
-        setMessage("✅ Address saved successfully");
-        await load();
-      } else {
-        const result = await response.json().catch(() => ({}));
-        console.error('[saveAddress] Error response:', result);
-        setMessage(result.error || "Unable to save address. Please try again.");
-      }
-    } catch (error) {
-      console.error('[saveAddress] Exception:', error);
-      setMessage("An error occurred. Please try again.");
+    const form = new FormData(event.currentTarget);
+    const payloadEntries = Array.from(form.entries()).map(([key, value]) => [
+      key,
+      typeof value === 'string' ? value : String(value),
+    ]);
+    const payload = Object.fromEntries(payloadEntries);
+    const normalized = {
+      type: String(payload.type || "Home").trim() || "Home",
+      fullName: String(
+        payload.fullName ?? payload.full_name ?? customer?.name ?? "",
+      ).trim(),
+      phone: String(payload.phone ?? "").trim(),
+      gstNumber: String(payload.gstNumber ?? "").trim(),
+      addressLine1: String(
+        payload.addressLine1 ?? payload.address_line1 ?? "",
+      ).trim(),
+      addressLine2: String(
+        payload.addressLine2 ?? payload.address_line2 ?? "",
+      ).trim(),
+      area: String(payload.area ?? "").trim(),
+      city: String(payload.city ?? "").trim(),
+      state: String(payload.state ?? "").trim(),
+      pincode: String(payload.pincode ?? "").trim(),
+      isDefault: form.get("isDefault") === "on" || Boolean(payload.isDefault),
+    };
+    const response = await fetch(
+      editing?.id ? `/api/me/addresses/${editing.id}` : "/api/me/addresses",
+      {
+        method: editing?.id ? "PATCH" : "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify(normalized),
+      },
+    );
+    if (response.ok) {
+      setEditing(null);
+      setMessage("Address saved");
+      void load();
+    } else {
+      const result = await response.json().catch(() => ({}));
+      setMessage(result.error || "Unable to save address");
     }
   };
   const removeAddress = async (id: number) => {
