@@ -1394,7 +1394,31 @@ app.get('/api/product-types', (req, res) => {
   
   res.json(rows); 
 });
-app.post('/api/product-types', auth, admin, (req, res) => { const body = req.body || {}; const timestamp = now(); try { const result = db.prepare('INSERT INTO product_types (category_id,name,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?)').run(Number(body.categoryId), String(body.name).trim(), body.status || 'ACTIVE', Number(body.sortOrder || 0), timestamp, timestamp); res.status(201).json(mapProductType(db.prepare('SELECT * FROM product_types WHERE id = ?').get(result.lastInsertRowid))); } catch (error) { res.status(400).json({ error: error.message.includes('UNIQUE') ? 'A product type with that name already exists in this category' : 'Unable to create product type' }); } });
+app.post('/api/product-types', auth, admin, (req, res) => { 
+  const body = req.body || {}; 
+  const timestamp = now(); 
+  const categoryId = Number(body.categoryId);
+  const name = String(body.name || '').trim();
+  
+  if (!categoryId || !name) {
+    return res.status(400).json({ error: 'Category ID and name are required' });
+  }
+  
+  // Validate category exists
+  const category = db.prepare('SELECT id, status FROM categories WHERE id = ?').get(categoryId);
+  if (!category) {
+    return res.status(400).json({ error: 'Category not found' });
+  }
+  
+  try { 
+    const result = db.prepare('INSERT INTO product_types (category_id,name,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?)').run(
+      categoryId, name, body.status || 'ACTIVE', Number(body.sortOrder || 0), timestamp, timestamp
+    ); 
+    res.status(201).json(mapProductType(db.prepare('SELECT * FROM product_types WHERE id = ?').get(result.lastInsertRowid))); 
+  } catch (error) { 
+    res.status(error.message.includes('UNIQUE') ? 409 : 400).json({ error: error.message.includes('UNIQUE') ? 'A product type with that name already exists in this category' : 'Unable to create product type' }); 
+  } 
+});
 app.patch('/api/product-types/:id/archive', auth, admin, (req, res) => { const id = Number(req.params.id); const productCount = db.prepare("SELECT COUNT(*) count FROM products WHERE product_type_id = ? AND status != 'ARCHIVED'").get(id).count; if (productCount > 0) { const result = db.prepare("UPDATE product_types SET status = 'ARCHIVED', updated_at = ? WHERE id = ?").run(now(), id); if (!result.changes) return res.status(404).json({ error: 'Product type not found' }); return res.json({ archived: true, productCount, message: 'Product type archived and removed from active category workflows.' }); } const result = db.prepare('DELETE FROM product_types WHERE id = ?').run(id); if (!result.changes) return res.status(404).json({ error: 'Product type not found' }); res.json({ deleted: true, message: 'Product type deleted because it has no remaining products.' }); });
 app.patch('/api/product-types/:id/restore', auth, admin, (req, res) => { const result = db.prepare("UPDATE product_types SET status = 'ACTIVE', updated_at = ? WHERE id = ?").run(now(), Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Product type not found' }); res.json({ restored: true }); });
 app.get('/api/attributes', (req, res) => { const categoryId = Number(req.query.categoryId || 0); const query = categoryId ? 'SELECT * FROM attributes WHERE category_id = ? ORDER BY sort_order, name' : 'SELECT * FROM attributes ORDER BY category_id, sort_order, name'; const rows = categoryId ? db.prepare(query).all(categoryId) : db.prepare(query).all(); res.json(rows.map(mapAttribute)); });
@@ -1561,94 +1585,84 @@ app.post('/api/products/bulk-import', auth, admin, (req, res) => {
     });
   }
 
-  // ── STAGE 3: persist in a single transaction ──────────────────────────────
-  // Process in chunks of 200 to avoid SQLite statement limit but keep one tx
-  const CHUNK = 200;
+  // ── STAGE 3: prepare statements outside transaction ─────────────────────────
+  const stmtInsertBrand   = db.prepare('INSERT INTO brands (name,slug,description,status,created_at,updated_at) VALUES (?,?,?,?,?,?)');
+  const stmtInsertType    = db.prepare('INSERT INTO product_types (category_id,name,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?)');
+  const stmtInsertProduct = db.prepare('INSERT INTO products (sku,name,slug,category_id,brand_id,product_type_id,description,details,price,mrp,discount,stock,unit,image_url,image_urls_json,attributes_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+  const stmtUpdateProduct = db.prepare('UPDATE products SET name=?,category_id=?,brand_id=?,product_type_id=?,description=?,details=?,price=?,mrp=?,discount=?,stock=?,unit=?,image_url=?,image_urls_json=?,attributes_json=?,status=?,updated_at=? WHERE LOWER(sku)=LOWER(?)');
+  const stmtFindProduct   = db.prepare('SELECT id,sku FROM products WHERE LOWER(sku)=LOWER(?) LIMIT 1');
+  const stmtFindBrand     = db.prepare('SELECT id FROM brands WHERE LOWER(name)=LOWER(?) LIMIT 1');
+  const stmtFindType      = db.prepare('SELECT id FROM product_types WHERE category_id=? AND LOWER(name)=LOWER(?) LIMIT 1');
+
+  // ── STAGE 4: persist in a single transaction ──────────────────────────────
   try {
     db.exec('BEGIN IMMEDIATE');
 
-    const insertBrand = db.prepare(
-      'INSERT INTO brands (name,slug,description,status,created_at,updated_at) VALUES (?,?,?,?,?,?)'
-    );
-    const insertType = db.prepare(
-      'INSERT INTO product_types (category_id,name,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?)'
-    );
-    const insertProduct = db.prepare(
-      'INSERT INTO products (sku,name,slug,category_id,brand_id,product_type_id,description,details,price,mrp,discount,stock,unit,image_url,image_urls_json,attributes_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
-    );
-    const updateProduct = db.prepare(
-      'UPDATE products SET name=?,category_id=?,brand_id=?,product_type_id=?,description=?,details=?,price=?,mrp=?,discount=?,stock=?,unit=?,image_url=?,image_urls_json=?,attributes_json=?,status=?,updated_at=? WHERE LOWER(sku)=LOWER(?)'
-    );
-    const findProduct = db.prepare('SELECT id,sku FROM products WHERE LOWER(sku)=LOWER(?) LIMIT 1');
-
-    for (let i = 0; i < valid.length; i += CHUNK) {
-      const chunk = valid.slice(i, i + CHUNK);
-
-      for (const item of chunk) {
-        // Resolve or create brand
-        let brandId = item.brandInfo?.id ?? null;
-        if (!brandId && item.brandName) {
-          const key = normalizeName(item.brandName);
-          if (brandMap.has(key)) {
-            brandId = brandMap.get(key).id;
-          } else {
-            try {
-              const r = insertBrand.run(item.brandName, slugify(item.brandName), '', 'ACTIVE', timestamp, timestamp);
-              brandId = Number(r.lastInsertRowid);
-              brandMap.set(key, { id: brandId, name: item.brandName });
-            } catch (e) {
-              // Race: another row in this batch may have inserted it
-              const existing = db.prepare('SELECT id FROM brands WHERE LOWER(name)=LOWER(?)').get(item.brandName);
-              if (existing) { brandId = existing.id; brandMap.set(key, { id: brandId, name: item.brandName }); }
-            }
-          }
-        }
-
-        // Resolve or create product type
-        let typeId = item.typeInfo?.id ?? null;
-        if (!typeId && item.typeName && item.categoryInfo) {
-          const tk = typeKey(item.categoryInfo.id, item.typeName);
-          if (typeMap.has(tk)) {
-            typeId = typeMap.get(tk).id;
-          } else {
-            try {
-              const r = insertType.run(item.categoryInfo.id, item.typeName, 'ACTIVE', 0, timestamp, timestamp);
-              typeId = Number(r.lastInsertRowid);
-              typeMap.set(tk, { id: typeId, name: item.typeName });
-            } catch (e) {
-              const existing = db.prepare('SELECT id FROM product_types WHERE category_id=? AND LOWER(name)=LOWER(?)').get(item.categoryInfo.id, item.typeName);
-              if (existing) { typeId = existing.id; typeMap.set(tk, { id: typeId, name: item.typeName }); }
-            }
-          }
-        }
-
-        const existing = existingSkus.has(item.sku.toLowerCase()) ? findProduct.get(item.sku) : null;
-
-        if (existing) {
-          if (duplicateMode === 'skip') {
-            results.push({ row: item.row, sku: item.sku, status: 'skipped', reason: 'SKU already exists' });
-            continue;
-          }
-          updateProduct.run(
-            item.name, item.categoryInfo.id, brandId, typeId,
-            item.description, item.details, item.price, item.mrp, item.discount,
-            item.stock, item.unit, item.imageUrl,
-            JSON.stringify(item.imageUrls), JSON.stringify(item.attributes),
-            item.status, timestamp, item.sku
-          );
-          results.push({ row: item.row, sku: item.sku, status: 'updated' });
+    for (const item of valid) {
+      // Resolve or auto-create brand
+      let brandId = item.brandInfo?.id ?? null;
+      if (!brandId && item.brandName) {
+        const key = normalizeName(item.brandName);
+        if (brandMap.has(key)) {
+          brandId = brandMap.get(key).id;
         } else {
-          const slug = slugify(`${item.name}-${item.sku}`);
-          insertProduct.run(
-            item.sku, item.name, slug, item.categoryInfo.id, brandId, typeId,
-            item.description, item.details, item.price, item.mrp, item.discount,
-            item.stock, item.unit, item.imageUrl,
-            JSON.stringify(item.imageUrls), JSON.stringify(item.attributes),
-            item.status, timestamp, timestamp
-          );
-          existingSkus.add(item.sku.toLowerCase());
-          results.push({ row: item.row, sku: item.sku, status: 'imported' });
+          const found = stmtFindBrand.get(item.brandName);
+          if (found) {
+            brandId = found.id;
+            brandMap.set(key, { id: brandId, name: item.brandName });
+          } else {
+            const r = stmtInsertBrand.run(item.brandName, slugify(item.brandName), '', 'ACTIVE', timestamp, timestamp);
+            brandId = Number(r.lastInsertRowid);
+            brandMap.set(key, { id: brandId, name: item.brandName });
+          }
         }
+      }
+
+      // Resolve or auto-create product type
+      let typeId = item.typeInfo?.id ?? null;
+      if (!typeId && item.typeName && item.categoryInfo) {
+        const tk = typeKey(item.categoryInfo.id, item.typeName);
+        if (typeMap.has(tk)) {
+          typeId = typeMap.get(tk).id;
+        } else {
+          const found = stmtFindType.get(item.categoryInfo.id, item.typeName);
+          if (found) {
+            typeId = found.id;
+            typeMap.set(tk, { id: typeId, name: item.typeName });
+          } else {
+            const r = stmtInsertType.run(item.categoryInfo.id, item.typeName, 'ACTIVE', 0, timestamp, timestamp);
+            typeId = Number(r.lastInsertRowid);
+            typeMap.set(tk, { id: typeId, name: item.typeName });
+          }
+        }
+      }
+
+      const existing = existingSkus.has(item.sku.toLowerCase()) ? stmtFindProduct.get(item.sku) : null;
+
+      if (existing) {
+        if (duplicateMode === 'skip') {
+          results.push({ row: item.row, sku: item.sku, status: 'skipped', reason: 'SKU already exists' });
+          continue;
+        }
+        stmtUpdateProduct.run(
+          item.name, item.categoryInfo.id, brandId, typeId,
+          item.description, item.details, item.price, item.mrp, item.discount,
+          item.stock, item.unit, item.imageUrl,
+          JSON.stringify(item.imageUrls), JSON.stringify(item.attributes),
+          item.status, timestamp, item.sku
+        );
+        results.push({ row: item.row, sku: item.sku, status: 'updated' });
+      } else {
+        stmtInsertProduct.run(
+          item.sku, item.name, slugify(`${item.name}-${item.sku}`),
+          item.categoryInfo.id, brandId, typeId,
+          item.description, item.details, item.price, item.mrp, item.discount,
+          item.stock, item.unit, item.imageUrl,
+          JSON.stringify(item.imageUrls), JSON.stringify(item.attributes),
+          item.status, timestamp, timestamp
+        );
+        existingSkus.add(item.sku.toLowerCase());
+        results.push({ row: item.row, sku: item.sku, status: 'imported' });
       }
     }
 
@@ -1656,7 +1670,7 @@ app.post('/api/products/bulk-import', auth, admin, (req, res) => {
   } catch (error) {
     try { db.exec('ROLLBACK'); } catch { /* already closed */ }
     console.error('[api/products/bulk-import]', error?.stack || error);
-    return res.status(500).json({ error: 'Import transaction failed. No products were saved.' });
+    return res.status(500).json({ error: `Import transaction failed: ${error && error.message ? error.message : 'unknown error'}. No products were saved.` });
   }
 
   const imported = results.filter(r => r.status === 'imported').length;
