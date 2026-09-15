@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const { createPgCompatDatabase } = require('./postgresCompat.cjs');
+const security = require('./security.cjs');
 
 const root = path.resolve(__dirname, '..');
 const runtimeEnvPath = path.join(root, '.env');
@@ -746,14 +747,11 @@ console.log('[database] Connected', { path: isProduction ? 'postgresql://configu
 const app = express();
 console.log('[database] Configured', { path: isProduction ? 'postgresql://configured-via-DATABASE_URL' : databasePath, resolvedPath: resolvedDatabasePath, uploadDirectory, resolvedUploadDirectory, jwtSecretConfigured: Boolean(jwtSecret), seedDemoData: seedDemoDataEnabled, mode: isProduction ? 'postgresql' : 'sqlite' });
 
-// CORS configuration
-const corsOptions = {
-  origin: isProduction 
-    ? (process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : true)
-    : true,
-  credentials: true,
-  optionsSuccessStatus: 200
-};
+// Security: Apply security headers to all responses
+app.use(security.securityHeaders);
+
+// Security: CORS configuration with explicit origins
+const corsOptions = security.getCorsOptions(isProduction);
 app.use(cors(corsOptions));
 
 app.use(express.json({ limit: '10mb' }));
@@ -773,11 +771,15 @@ const isValidGstNumber = (value) => {
   const normalized = normalizeGstNumber(value);
   return !normalized || gstNumberPattern.test(normalized);
 };
-const auth = (req, res, next) => { const token = (req.headers.authorization || '').replace(/^Bearer /, ''); try { req.user = jwt.verify(token, jwtSecret); next(); } catch { res.status(401).json({ error: 'Authentication required' }); } };
-const admin = (req, res, next) => req.user?.role === 'ADMIN' ? next() : res.status(403).json({ error: 'Admin permission required' });
+const auth = security.createAuthMiddleware(jwtSecret);
+const admin = security.requireAdmin;
+const customer = security.requireCustomer;
 app.get('/api/health', (_req, res) => res.json({ ok: true, database: isProduction ? 'postgresql' : 'sqlite', environment: process.env.NODE_ENV || 'development', productionDatabaseConfigured: Boolean(productionDatabaseUrl) }));
-app.post('/api/auth/login', (req, res) => { const rawIdentifier = String(req.body.mobile ?? req.body.email ?? req.body.username ?? '').trim(); const password = String(req.body.password || ''); const normalizedMobile = normalizeMobile(rawIdentifier); const email = rawIdentifier.includes('@') ? rawIdentifier.toLowerCase() : ''; if ((!mobilePattern.test(normalizedMobile) && !email) || !password) return res.status(400).json({ error: 'Invalid mobile number or password.' }); const user = db.prepare("SELECT * FROM users WHERE status = 'ACTIVE' AND ((mobile_number = ? AND mobile_number IS NOT NULL) OR email = ?) LIMIT 1").get(normalizedMobile || null, email || null); if (!user || !bcrypt.compareSync(password, user.password_hash)) return res.status(401).json({ error: 'Invalid mobile number or password.' }); db.prepare("UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?").run(now(), now(), user.id); const token = jwt.sign({ id: user.id, role: user.role, email: user.email, mobile: user.mobile_number }, jwtSecret, { expiresIn: '8h' }); res.json({ token, user: { id: user.id, name: user.name, email: user.email, mobile: user.mobile_number, role: user.role } }); });
-app.post('/api/auth/register', (req, res) => {
+
+// Security: Rate limit authentication endpoints
+app.post('/api/auth/login', security.authRateLimit, (req, res) => { const rawIdentifier = String(req.body.mobile ?? req.body.email ?? req.body.username ?? '').trim(); const password = String(req.body.password || ''); const normalizedMobile = normalizeMobile(rawIdentifier); const email = rawIdentifier.includes('@') ? rawIdentifier.toLowerCase() : ''; if ((!mobilePattern.test(normalizedMobile) && !email) || !password) return res.status(400).json({ error: 'Invalid mobile number or password.' }); const user = db.prepare("SELECT * FROM users WHERE status = 'ACTIVE' AND ((mobile_number = ? AND mobile_number IS NOT NULL) OR email = ?) LIMIT 1").get(normalizedMobile || null, email || null); if (!user || !bcrypt.compareSync(password, user.password_hash)) return res.status(401).json({ error: 'Invalid mobile number or password.' }); db.prepare("UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?").run(now(), now(), user.id); const token = jwt.sign({ id: user.id, role: user.role, email: user.email, mobile: user.mobile_number }, jwtSecret, { expiresIn: '8h' }); res.json({ token, user: { id: user.id, name: user.name, email: user.email, mobile: user.mobile_number, role: user.role } }); });
+// Security: Rate limit registration endpoint
+app.post('/api/auth/register', security.registerRateLimit, (req, res) => {
   const body = req.body && typeof req.body === 'object' ? req.body : {};
   console.log('[api/auth/register]', {
     method: req.method,
@@ -1521,12 +1523,11 @@ app.patch('/api/admin/settings', auth, admin, (req, res) => { const body = req.b
 });
 app.use(express.static(path.join(root, 'dist')));
 app.use((req, res, next) => { if (req.method !== 'GET' || req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) return next(); res.sendFile(path.join(root, 'dist', 'index.html')); });
-app.use((error, _req, res, _next) => {
-  console.error('UNEXPECTED_SERVER_ERROR');
-  console.error(error && error.stack ? error.stack : error);
-  // Temporarily send actual error in production for debugging
-  const errorMessage = error && error.message ? error.message : 'Unexpected server error';
-  const errorDetails = isProduction ? { error: errorMessage, stack: error && error.stack ? error.stack : null } : { error: 'Unexpected server error' };
-  res.status(500).json(errorDetails);
-});
+
+// Security: Global error handler (must be last)
+app.use(security.errorHandler);
+
 app.listen(port, () => console.log(`Catalog API listening on http://localhost:${port}`));
+
+// Security: Global error handler (must be last)
+app.use(security.errorHandler);

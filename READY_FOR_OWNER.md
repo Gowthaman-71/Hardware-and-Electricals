@@ -27,7 +27,7 @@
 ```
 URL: http://localhost:5173
 Email: owner@murugesan.in
-Password: Bu@240708
+Password: [ADMIN_PASSWORD - Set in Render Dashboard]
 Mobile: 9361866771
 ```
 
@@ -39,7 +39,7 @@ Mobile: 9361866771
 1. Open http://localhost:5173
 2. Click "Store workspace" or login link
 3. Enter email: **owner@murugesan.in**
-4. Enter password: **Bu@240708**
+4. Enter password: **[ADMIN_PASSWORD - Set in Render Dashboard]**
 5. Click "Login"
 
 ### Step 2: Add Category

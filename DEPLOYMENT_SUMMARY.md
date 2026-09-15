@@ -26,7 +26,7 @@ The admin account existed in the database but the password hash was **corrupted 
 
 **Login URL:** `http://localhost:5173` (dev) or your production URL  
 **Email:** `owner@murugesan.in`  
-**Password:** `Bu@240708`  
+**Password:** `[ADMIN_PASSWORD - Set in Render Dashboard]`  
 **Role:** `ADMIN`  
 **Mobile:** `9361866771`
 
@@ -174,7 +174,7 @@ npm run dev      # Frontend: http://localhost:5173
 ```
 JWT_SECRET=[auto-generated]
 ADMIN_EMAIL=owner@murugesan.in
-ADMIN_PASSWORD=Bu@240708
+ADMIN_PASSWORD=[ADMIN_PASSWORD - Set in Render Dashboard]
 ADMIN_MOBILE=9361866771
 OWNER_WHATSAPP_NUMBER=919361866771
 DATABASE_URL=[PostgreSQL connection]
@@ -207,7 +207,7 @@ UPLOAD_DIR=/tmp/uploads
 ### Application Access
 - **Local Frontend:** http://localhost:5173
 - **Local API:** http://localhost:8787
-- **Admin Login:** email: `owner@murugesan.in` / password: `Bu@240708`
+- **Admin Login:** email: `owner@murugesan.in` / password: `[ADMIN_PASSWORD - Set in Render Dashboard]`
 
 ### Testing
 Both development servers are currently running:

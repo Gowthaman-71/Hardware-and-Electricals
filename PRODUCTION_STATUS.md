@@ -53,7 +53,7 @@ The production site is not working because it's running **OLD CODE** before all 
 DATABASE_URL=postgresql://your-database-connection-string
 JWT_SECRET=your-long-random-secret-32-characters-minimum
 ADMIN_EMAIL=owner@murugesan.in
-ADMIN_PASSWORD=Bu@240708
+ADMIN_PASSWORD=[ADMIN_PASSWORD - Set in Render Dashboard]
 ```
 
 ### Recommended:
@@ -127,7 +127,7 @@ Open: https://murugesan-electrical-and-hardwares.onrender.com/api/health
 ### 3. Test Admin Login:
 1. Click "Store workspace" or login
 2. Email: `owner@murugesan.in`
-3. Password: `Bu@240708`
+3. Password: `[ADMIN_PASSWORD - Set in Render Dashboard]`
 4. ✅ Should login successfully
 
 ### 4. Test Add Category:
@@ -171,7 +171,7 @@ Open: https://murugesan-electrical-and-hardwares.onrender.com/api/health
 1. **Login as Admin**
    - URL: https://murugesan-electrical-and-hardwares.onrender.com
    - Email: owner@murugesan.in
-   - Password: Bu@240708
+   - Password: [ADMIN_PASSWORD - Set in Render Dashboard]
 
 2. **Add Categories**
    - Click "Categories"

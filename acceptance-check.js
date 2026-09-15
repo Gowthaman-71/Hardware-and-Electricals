@@ -65,7 +65,7 @@ async function startServer() {
     env: {
       ...process.env,
       NODE_ENV: 'production',
-      JWT_SECRET: 'prod-verify-secret',
+      JWT_SECRET: process.env.JWT_SECRET || 'test-secret-for-acceptance-check-only',
       DATABASE_PATH: DB_PATH,
       UPLOAD_DIR: '/var/data/uploads',
       SEED_DEMO_DATA: 'false',
@@ -169,7 +169,7 @@ async function cleanupAcceptanceData() {
 
     const adminLogin = await api('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ email: 'owner@murugesan.in', password: 'change-this-before-production' }),
+      body: JSON.stringify({ email: process.env.ADMIN_EMAIL || 'owner@murugesan.in', password: process.env.ADMIN_PASSWORD || 'change-this-before-production' }),
     });
     assertCondition(adminLogin.ok && adminLogin.body && adminLogin.body.token, `Admin login failed: ${JSON.stringify(adminLogin)}`);
     const adminToken = adminLogin.body.token;

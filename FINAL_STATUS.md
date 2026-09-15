@@ -28,7 +28,7 @@
 
 ### Admin Credentials:
 - **Email:** owner@murugesan.in
-- **Password:** Bu@240708
+- **Password:** [ADMIN_PASSWORD - Set in Render Dashboard]
 - **Mobile:** 9361866771
 
 ### Server Status:
@@ -47,7 +47,7 @@
 2. Click "Store workspace" or go to login
 3. Enter:
    Email: owner@murugesan.in
-   Password: Bu@240708
+   Password: [ADMIN_PASSWORD - Set in Render Dashboard]
 4. Click "Login"
 ```
 

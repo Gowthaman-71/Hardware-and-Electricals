@@ -46,7 +46,7 @@ DATABASE_URL=postgresql://username:password@host:port/database
 ```
 JWT_SECRET=your-long-random-secret-at-least-32-characters
 ADMIN_EMAIL=owner@murugesan.in
-ADMIN_PASSWORD=Bu@240708
+ADMIN_PASSWORD=[ADMIN_PASSWORD - Set in Render Dashboard]
 ```
 
 ### Recommended:

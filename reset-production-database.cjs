@@ -8,8 +8,14 @@
 
 const { Pool } = require('pg');
 
-// Your Neon PostgreSQL connection string
-const DATABASE_URL = 'postgresql://neondb_owner:npg_9GKyDRsFN5mL@ep-aged-darkness-b3bwqh1y-pooler.c-4.ap-southeast-1.aws.neon.tech/neondb?sslmode=require';
+// Get database URL from environment variable
+const DATABASE_URL = process.env.DATABASE_URL;
+
+if (!DATABASE_URL) {
+  console.error('ERROR: DATABASE_URL environment variable is required');
+  console.error('Usage: DATABASE_URL=your-connection-string node reset-production-database.cjs');
+  process.exit(1);
+}
 
 async function resetDatabase() {
   const pool = new Pool({

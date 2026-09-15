@@ -15,7 +15,7 @@ Reset the password hash in the database to match the configured password from `.
 
 ```bash
 # The password hash was regenerated and updated in the database
-Password: Bu@240708
+Password: [ADMIN_PASSWORD - Set in Render Dashboard]
 ```
 
 ## Verification
@@ -24,7 +24,7 @@ Tested login endpoint successfully:
 POST /api/auth/login
 {
   "email": "owner@murugesan.in",
-  "password": "Bu@240708"
+  "password": "[ADMIN_PASSWORD - Set in Render Dashboard]"
 }
 
 Response: ✓ SUCCESS
@@ -42,7 +42,7 @@ Response: ✓ SUCCESS
 
 ## Current Admin Credentials
 **Email:** `owner@murugesan.in`  
-**Password:** `Bu@240708`  
+**Password:** `[ADMIN_PASSWORD - Set in Render Dashboard]`  
 **Role:** `ADMIN`  
 **Mobile:** `9361866771`
 
