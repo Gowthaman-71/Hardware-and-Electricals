@@ -769,10 +769,11 @@ function migrateOrderStatusData() {
   
   // Update CHECK constraint to include REJECTED status
   try {
-    // Check if we can insert a row with REJECTED status
-    const testResult = db.prepare("INSERT INTO orders (order_number,customer_id,customer_name,customer_email,customer_phone,items_json,subtotal,delivery_charge,total,status,payment_method,payment_status,delivery_address_json,created_at,updated_at) VALUES ('TEST-REJECTED-CONSTRAINT',1,'Test','test@test.com','1234567890','[]',0,0,0,'REJECTED','Cash on Delivery','PENDING','{}',datetime('now'),datetime('now'))").run();
-    // If successful, delete the test row
-    db.prepare("DELETE FROM orders WHERE order_number = 'TEST-REJECTED-CONSTRAINT'").run();
+    if (!isProduction) {
+      // Check if SQLite needs its legacy orders CHECK constraint rebuilt.
+      const testResult = db.prepare("INSERT INTO orders (order_number,customer_id,customer_name,customer_email,customer_phone,items_json,subtotal,delivery_charge,total,status,payment_method,payment_status,delivery_address_json,created_at,updated_at) VALUES ('TEST-REJECTED-CONSTRAINT',1,'Test','test@test.com','1234567890','[]',0,0,0,'REJECTED','Cash on Delivery','PENDING','{}',?,?)").run(now(), now());
+      db.prepare("DELETE FROM orders WHERE order_number = 'TEST-REJECTED-CONSTRAINT'").run();
+    }
   } catch (error) {
     // If constraint fails, we need to recreate the table
     if (String(error.message).includes('CHECK constraint')) {
@@ -826,6 +827,10 @@ function ensureCoreAdminAccount() {
   const configuredPassword = process.env.ADMIN_PASSWORD || 'change-this-before-production';
   const existingByEmail = db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE LOWER(email) = LOWER(?) ORDER BY id LIMIT 1").get(adminEmail) || null;
   if (existingByEmail) return;
+  const existingByMobile = adminMobile
+    ? db.prepare("SELECT id, email, mobile_number, role, status FROM users WHERE mobile_number = ? ORDER BY id LIMIT 1").get(adminMobile) || null
+    : null;
+  if (existingByMobile) return;
 
   const passwordHash = bcrypt.hashSync(configuredPassword, 12);
   try {
