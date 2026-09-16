@@ -1,11 +1,16 @@
 import { execSync, spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 
 const ROOT = 'd:/E commerce';
-const BASE = 'http://localhost:8787';
-const DB_PATH = process.platform === 'win32' ? path.resolve('/var/data/catalog.sqlite') : '/var/data/catalog.sqlite';
+const TEST_PORT = 8898;
+const BASE = `http://127.0.0.1:${TEST_PORT}`;
+const TEST_ADMIN_EMAIL = 'acceptance-owner@test.local';
+const TEST_ADMIN_PASSWORD = 'AcceptancePass123';
+const TEST_ADMIN_MOBILE = '9361866771';
+const DB_PATH = path.resolve(ROOT, 'server/data/acceptance-test.sqlite');
+if (existsSync(DB_PATH)) unlinkSync(DB_PATH);
 
 const db = new DatabaseSync(DB_PATH);
 let serverProcess = null;
@@ -60,12 +65,16 @@ async function startServer() {
     return serverProcess;
   }
 
-  serverProcess = spawn(process.execPath, ['--experimental-sqlite', 'server/index.cjs'], {
+  serverProcess = spawn(process.execPath, ['server/index.cjs'], {
     cwd: ROOT,
     env: {
       ...process.env,
-      NODE_ENV: 'production',
+      NODE_ENV: 'development',
+      PORT: String(TEST_PORT),
       JWT_SECRET: process.env.JWT_SECRET || 'test-secret-for-acceptance-check-only',
+      ADMIN_EMAIL: TEST_ADMIN_EMAIL,
+      ADMIN_PASSWORD: TEST_ADMIN_PASSWORD,
+      ADMIN_MOBILE: TEST_ADMIN_MOBILE,
       DATABASE_PATH: DB_PATH,
       UPLOAD_DIR: '/var/data/uploads',
       SEED_DEMO_DATA: 'false',
@@ -80,13 +89,23 @@ async function startServer() {
   serverProcess.stderr.on('data', (chunk) => {
     output += chunk.toString();
   });
+  serverProcess.on('error', (error) => {
+    output += `\n[child error] ${error.stack || error}\n`;
+  });
+  serverProcess.on('exit', (code, signal) => {
+    output += `\n[child exit] code=${code} signal=${signal}\n`;
+  });
 
   try {
     await waitForServer();
+    await sleep(250);
+    if (serverProcess.exitCode !== null) {
+      throw new Error(`Acceptance server exited with code ${serverProcess.exitCode}. Output: ${output}`);
+    }
     return serverProcess;
   } catch (error) {
     const details = output || String(error.message);
-    serverProcess.kill('SIGTERM');
+    await stopServer();
     throw new Error(`Server startup failed: ${details}`);
   }
 }
@@ -96,7 +115,13 @@ async function stopServer() {
     return;
   }
   serverProcess.kill('SIGTERM');
-  await sleep(500);
+  await new Promise((resolve) => {
+    const timeout = setTimeout(resolve, 10000);
+    serverProcess.once('exit', () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+  });
 }
 
 async function restartServer() {
@@ -121,6 +146,8 @@ function countSql(sql, ...args) {
 }
 
 async function cleanupAcceptanceData() {
+  const productsTable = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'products'").get();
+  if (!productsTable) return;
   const productIds = db.prepare("SELECT id FROM products WHERE sku LIKE 'ACCEPTANCE-%' OR name LIKE 'ACCEPTANCE%' OR sku LIKE 'STOCK-%' OR sku LIKE 'SHORT-%' OR sku LIKE 'ZERO-%' OR sku LIKE 'ROLLBACK-%' OR sku LIKE 'SIM-%' OR sku LIKE 'PERMANENT-%'").all().map((row) => Number(row.id));
   const categoryIds = db.prepare("SELECT id FROM categories WHERE slug LIKE 'acceptance-%' OR name LIKE 'ACCEPTANCE%'").all().map((row) => Number(row.id));
   const orderIds = db.prepare("SELECT id FROM orders WHERE order_number LIKE 'MH-%' AND customer_id IN (SELECT id FROM users WHERE email LIKE '%@acceptance.test' OR name LIKE 'Acceptance%' OR name LIKE 'Stock User%' OR name LIKE 'Short User%' OR name LIKE 'Zero User%' OR name LIKE 'Rollback User%' OR name LIKE 'Sim A%' OR name LIKE 'Sim B%')").all().map((row) => Number(row.id));
@@ -169,7 +196,7 @@ async function cleanupAcceptanceData() {
 
     const adminLogin = await api('/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ email: process.env.ADMIN_EMAIL || 'owner@murugesan.in', password: process.env.ADMIN_PASSWORD || 'change-this-before-production' }),
+      body: JSON.stringify({ email: TEST_ADMIN_EMAIL, password: TEST_ADMIN_PASSWORD }),
     });
     assertCondition(adminLogin.ok && adminLogin.body && adminLogin.body.token, `Admin login failed: ${JSON.stringify(adminLogin)}`);
     const adminToken = adminLogin.body.token;
@@ -711,5 +738,6 @@ async function cleanupAcceptanceData() {
   } finally {
     await stopServer();
     await cleanupAcceptanceData();
+    db.close();
   }
 })();

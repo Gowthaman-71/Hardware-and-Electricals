@@ -6,9 +6,11 @@ const multer = require('multer');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { imageSize } = require('image-size');
 const { DatabaseSync } = require('node:sqlite');
 const { createPgCompatDatabase } = require('./postgresCompat.cjs');
 const security = require('./security.cjs');
+const { createStorage } = require('./storage.cjs');
 
 // Simple in-memory cache with TTL for static data (categories, brands, product types)
 class SimpleCache {
@@ -121,6 +123,7 @@ try {
 } catch (err) {
   throw new Error(`Unable to create upload directory: ${resolvedUploadDirectory} (${err.message})`);
 }
+const imageStorage = createStorage({ directory: resolvedUploadDirectory });
 
 if (isProduction) {
   console.log('[database] Production contract', {
@@ -372,7 +375,10 @@ const normalizePhoneNumber = (value) => {
   return digits.replace(/^0+/, '').slice(-10);
 };
 const normalizeMobile = normalizePhoneNumber;
-const ownerWhatsappNumberRaw = String(process.env.OWNER_WHATSAPP_NUMBER || process.env.WHATSAPP_OWNER_NUMBER || '919361866771').trim();
+const ownerWhatsappNumberRaw = String(process.env.OWNER_WHATSAPP_NUMBER || process.env.WHATSAPP_OWNER_NUMBER || '').trim();
+if (isProduction && !ownerWhatsappNumberRaw) {
+  throw new Error('OWNER_WHATSAPP_NUMBER is required in production.');
+}
 const normalizeWhatsAppNumber = (value) => {
   if (!value) return '';
   let digits = String(value).replace(/\D/g, '');
@@ -898,7 +904,7 @@ app.use((req, _res, next) => {
   next();
 });
 app.use('/uploads', express.static(uploadDirectory));
-const upload = multer({ dest: uploadDirectory, limits: { fileSize: 10 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 const mobilePattern = /^[6-9]\d{9}$/;
 const gstNumberPattern = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z0-9]{1}[A-Z0-9]{1}Z[A-Z0-9]{1}$/;
 const normalizeGstNumber = (value) => String(value || '').trim().toUpperCase().replace(/\s+/g, '');
@@ -2655,44 +2661,46 @@ const detectImageFormat = (filePath) => {
   if (header.length >= 12 && header.subarray(0, 4).toString('ascii') === 'RIFF' && header.subarray(8, 12).toString('ascii') === 'WEBP') return 'webp';
   return null;
 };
-app.post('/api/images', auth, admin, upload.single('image'), (req, res) => { 
+app.post('/api/images', auth, admin, upload.single('image'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Image is required' }); 
   
   // Validate file type
   const allowedMimeTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'];
   if (!allowedMimeTypes.includes(req.file.mimetype)) {
     // Clean up uploaded file
-    try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
     return res.status(400).json({ error: 'Only JPEG, PNG, WebP and GIF images are allowed' });
   }
   
   // Validate file size (max 10MB)
   if (req.file.size > 10 * 1024 * 1024) {
-    try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
     return res.status(400).json({ error: 'Image size must be less than 10MB' });
   }
 
-  const detectedFormat = detectImageFormat(req.file.path);
+  const temporaryPath = path.join(resolvedUploadDirectory, `.validate-${crypto.randomUUID()}`);
+  fs.writeFileSync(temporaryPath, req.file.buffer);
+  const detectedFormat = detectImageFormat(temporaryPath);
+  try { fs.unlinkSync(temporaryPath); } catch { /* ignore */ }
   const expectedFormats = { 'image/jpeg': 'jpeg', 'image/jpg': 'jpeg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
   if (!detectedFormat || detectedFormat !== expectedFormats[req.file.mimetype]) {
-    try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
     return res.status(400).json({ error: 'Uploaded file is not a valid supported image' });
   }
-
-  const uniqueName = `${Date.now()}-${crypto.randomUUID()}.${detectedFormat}`;
-  const safePath = path.join(uploadDirectory, uniqueName); 
-  
+  let dimensions;
+  try { dimensions = imageSize(req.file.buffer); } catch {
+    return res.status(400).json({ error: 'Uploaded image could not be decoded' });
+  }
+  if (!dimensions.width || !dimensions.height || dimensions.width > 10000 || dimensions.height > 10000) {
+    return res.status(400).json({ error: 'Uploaded image dimensions are invalid or too large' });
+  }
   try {
-    fs.renameSync(req.file.path, safePath); 
+    const stored = await imageStorage.uploadImage({ buffer: req.file.buffer, format: detectedFormat, mimetype: req.file.mimetype });
     res.status(201).json({ 
-      url: `/uploads/${uniqueName}`,
-      filename: uniqueName,
+      url: stored.url,
+      filename: stored.key,
       size: req.file.size,
       mimetype: req.file.mimetype
     }); 
   } catch (error) {
     console.error('[api/images POST]', error);
-    try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
     res.status(500).json({ error: 'Unable to save image' });
   }
 });
@@ -2795,4 +2803,16 @@ app.use((req, res, next) => { if (req.method !== 'GET' || req.path.startsWith('/
 // Security: Global error handler (must be last)
 app.use(security.errorHandler);
 
-app.listen(port, () => console.log(`Catalog API listening on http://localhost:${port}`));
+const httpServer = app.listen(port, () => console.log(`Catalog API listening on http://localhost:${port}`));
+let shuttingDown = false;
+const shutdown = () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  httpServer.close(() => {
+    try { db.close(); } catch (error) { console.error('[shutdown] database close failed', error.message); }
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(1), 10000).unref();
+};
+process.once('SIGTERM', shutdown);
+process.once('SIGINT', shutdown);

@@ -4,9 +4,16 @@
  */
 
 const jwt = require('jsonwebtoken');
+let Redis;
+try { Redis = require('ioredis'); } catch { Redis = null; }
 
 // Rate limiting store (in-memory - use Redis for production scaling)
 const rateLimitStore = new Map();
+const useRedisRateLimit = String(process.env.RATE_LIMIT_STORE || 'memory').toLowerCase() === 'redis';
+if (useRedisRateLimit && (!Redis || !process.env.REDIS_URL) && (process.env.NODE_ENV === 'production' || process.env.RENDER === 'true')) {
+  throw new Error('REDIS_URL and the Redis client are required when RATE_LIMIT_STORE=redis in production.');
+}
+const redisRateLimitClient = useRedisRateLimit && Redis && process.env.REDIS_URL ? new Redis(process.env.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 1 }) : null;
 
 /**
  * Rate Limiting Middleware
@@ -22,9 +29,30 @@ function rateLimit(options = {}) {
     skipSuccessfulRequests = false
   } = options;
 
-  return (req, res, next) => {
+  return async (req, res, next) => {
     const key = keyGenerator(req);
     const now = Date.now();
+
+    if (redisRateLimitClient) {
+      try {
+        if (redisRateLimitClient.status === 'wait') await redisRateLimitClient.connect();
+        const redisKey = `rate-limit:${key}:${windowMs}:${maxRequests}`;
+        const count = Number(await redisRateLimitClient.incr(redisKey));
+        if (count === 1) await redisRateLimitClient.expire(redisKey, Math.ceil(windowMs / 1000));
+        const resetTime = now + windowMs;
+        const retryAfter = Math.ceil(windowMs / 1000);
+        res.set('X-RateLimit-Limit', String(maxRequests));
+        res.set('X-RateLimit-Remaining', String(Math.max(0, maxRequests - count)));
+        res.set('X-RateLimit-Reset', new Date(resetTime).toISOString());
+        if (count > maxRequests) {
+          res.set('Retry-After', String(retryAfter));
+          return res.status(statusCode).json({ error: message });
+        }
+        return next();
+      } catch (error) {
+        console.error('[Security] Redis rate limiter unavailable; using memory fallback:', error.message);
+      }
+    }
     
     // Clean up old entries periodically
     if (Math.random() < 0.01) { // 1% chance to clean
@@ -94,7 +122,7 @@ const authRateLimit = rateLimit({
  */
 const registerRateLimit = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  maxRequests: 5, // 5 registrations per hour per IP
+  maxRequests: Number(process.env.RATE_LIMIT_REGISTER_MAX || 5), // 5 registrations per hour per IP
   message: 'Too many registration attempts, please try again later'
 });
 
