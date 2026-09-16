@@ -284,7 +284,7 @@ function DynamicCategoryManager({
         {visible.map((category) => (
           <div className="category-admin-card" key={category.id}>
             {category.image ? (
-              <img src={category.image} alt="" />
+              <img src={category.image} alt={`Category: ${category.name}`} />
             ) : (
               <span>◇</span>
             )}
@@ -309,27 +309,30 @@ function DynamicCategoryManager({
             </small>
             <div>
               {category.status === "ARCHIVED" ? (
-                <button onClick={async () => {
+                <button 
+                  aria-label={`Restore category: ${category.name}`}
+                  onClick={async () => {
                   const response = await fetch(`/api/categories/${category.id}/restore`, {
                     method: "PATCH",
                     headers: { Authorization: `Bearer ${apiToken}` },
                   });
                   if (!response.ok) return notify("Unable to restore category");
-                  const restored = (await response.json()) as Category;
-                  setCategories(categories.map(item => item.id === restored.id ? restored : item));
+                  const saved = (await response.json()) as Category;
+                  setCategories(categories.map((item) => (item.id === saved.id ? saved : item)));
                   notify("Category restored");
                 }}>Restore</button>
               ) : (
                 <>
-                  <button onClick={() => setEditing(category)}>Edit</button>
+                  <button aria-label={`Edit category: ${category.name}`} onClick={() => setEditing(category)}>Edit</button>
                   <button
+                    aria-label={`${category.active === false ? "Enable" : "Disable"} category: ${category.name}`}
                     onClick={() =>
                       update({ ...category, active: category.active === false })
                     }
                   >
                     {category.active === false ? "Enable" : "Disable"}
                   </button>
-                  <button onClick={() => remove(category)}>Delete</button>
+                  <button aria-label={`Delete category: ${category.name}`} onClick={() => remove(category)}>Delete</button>
                 </>
               )}
             </div>
@@ -344,7 +347,7 @@ function DynamicCategoryManager({
                 <p className="eyebrow">CATEGORY MANAGEMENT</p>
                 <h2>{editing.name ? "Edit Category" : "Add Category"}</h2>
               </div>
-              <button type="button" onClick={() => setEditing(null)}>
+              <button type="button" aria-label="Close form" onClick={() => setEditing(null)}>
                 ×
               </button>
             </div>
@@ -449,6 +452,7 @@ function DynamicCategoryManager({
                   </span>
                   <button
                     type="button"
+                    aria-label={`Delete attribute: ${attribute.name}`}
                     onClick={() =>
                       setEditing({
                         ...editing,
@@ -621,11 +625,11 @@ function AdminExtras({
         </section>
       </div>
       <div className="quick-actions">
-        <button onClick={onAdd}>＋ Add Product</button>
-        <button>▦ Manage Categories</button>
-        <button>▣ View Orders</button>
-        <button>▣ Inventory Report</button>
-        <button>◇ Add Offer</button>
+        <button aria-label="Add new product" onClick={onAdd}>＋ Add Product</button>
+        <button aria-label="Manage categories">▦ Manage Categories</button>
+        <button aria-label="View orders">▣ View Orders</button>
+        <button aria-label="View inventory report">▣ Inventory Report</button>
+        <button aria-label="Add offer">◇ Add Offer</button>
       </div>
     </>
   );
@@ -876,11 +880,20 @@ async function fetchWithTimeout(
   }
 }
 
-async function loadCatalog(): Promise<{
+async function loadCatalog(page: number = 1, limit: number = 24, categoryId?: number): Promise<{
   products: Product[];
   categories: Category[];
+  page: number;
+  limit: number;
+  total: number;
+  pages: number;
 }> {
-  const response = await fetchWithTimeout("/api/catalog", { cache: "no-store" });
+  const params = new URLSearchParams();
+  params.set("page", String(page));
+  params.set("limit", String(limit));
+  if (categoryId) params.set("categoryId", String(categoryId));
+  
+  const response = await fetchWithTimeout(`/api/catalog?${params.toString()}`, { cache: "no-store" });
   if (!response.ok) throw new Error("Unable to load catalog");
   return response.json();
 }
@@ -1025,7 +1038,7 @@ function BrandIntro({ onSkip }: { onSkip: () => void }) {
         <span>ELECTRICAL AND HARDWARES</span>
         <small>TIRUPATHUR</small>
       </div>
-      <button className="skip-intro" onClick={onSkip}>
+      <button className="skip-intro" aria-label="Skip brand introduction" onClick={onSkip}>
         Skip intro
       </button>
     </div>
@@ -1048,45 +1061,70 @@ function App() {
   };
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [catalogError, setCatalogError] = useState("");
   const [screen, setScreenState] = useState<Screen>("home");
+
+  // Suppress unused variable warning - catalogLoading is used for state management
+  void catalogLoading;
   const [adminView, setAdminView] = useState("Dashboard");
   const [selected, setSelected] = useState<Product | null>(null);
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("All");
+  const [catalogPage, setCatalogPage] = useState(1);
+  const [catalogPageSize, setCatalogPageSize] = useState(24);
+  const [catalogTotal, setCatalogTotal] = useState(0);
+  const [catalogPages, setCatalogPages] = useState(1);
+
+  // Debounce search query for customer-facing search
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedQuery(query), 300);
+    return () => window.clearTimeout(t);
+  }, [query]);
   const [cart, setCart] = useState<{ product: Product; quantity: number }[]>([]);
   
-  // Initialize cart from localStorage after products are loaded
+  // Restore cart from localStorage once products are loaded — clamp quantities to current stock
   useEffect(() => {
     if (products.length === 0) return;
-    
     try {
       const stored = localStorage.getItem("murugesan-cart");
       if (!stored) return;
-      
       const minimalCart = JSON.parse(stored);
       if (!Array.isArray(minimalCart)) return;
-      
-      // Restore full cart by matching product IDs
+
+      let anyAdjusted = false;
       const restoredCart = minimalCart
         .map((item: { productId: number; quantity: number }) => {
-          const product = products.find(p => p.id === item.productId);
-          return product ? { product, quantity: item.quantity || 1 } : null;
+          const product = products.find((p) => p.id === item.productId);
+          if (!product) return null; // product removed from catalog
+          const requestedQty = Math.max(1, Number(item.quantity) || 1);
+          const maxQty = product.stock;
+          if (maxQty === 0) {
+            anyAdjusted = true;
+            return null; // out of stock — drop from cart
+          }
+          const qty = Math.min(requestedQty, maxQty);
+          if (qty < requestedQty) anyAdjusted = true;
+          return { product, quantity: qty };
         })
         .filter((item): item is { product: Product; quantity: number } => item !== null);
-      
-      if (restoredCart.length > 0) {
-        setCart(restoredCart);
+
+      if (restoredCart.length > 0) setCart(restoredCart);
+      if (anyAdjusted) {
+        // Delay the notification so it doesn't fire before the UI renders
+        window.setTimeout(() => {
+          notify("Some cart quantities were adjusted to match current stock.");
+        }, 800);
       }
-    } catch (error) {
-      console.error('[Cart] Failed to restore from localStorage:', error);
+    } catch {
       localStorage.removeItem("murugesan-cart");
     }
-  }, [products]);
+  }, [products]); // eslint-disable-line react-hooks/exhaustive-deps
   const [editing, setEditing] = useState<Product | null>(null);
   const [authToken, setAuthToken] = useState(() => readStoredToken("murugesan-auth-token"));
   const [customerToken, setCustomerToken] = useState(() => readStoredToken("murugesan-customer-token"));
   const [customer, setCustomer] = useState<Customer | null>(null);
-  const [catalogError, setCatalogError] = useState("");
   const [toast, setToast] = useState("");
   const setScreen = (next: Screen) => {
     setScreenState(next);
@@ -1122,25 +1160,27 @@ function App() {
   useEffect(() => {
     let mounted = true;
     const refreshCatalog = async () => {
+      setCatalogLoading(true);
       try {
-        const catalog = await loadCatalog();
+        const categoryId = activeCategory === "All" ? undefined : categories.find(c => c.name === activeCategory)?.id;
+        const catalog = await loadCatalog(catalogPage, catalogPageSize, categoryId);
         if (!mounted) return;
         setProducts(catalog.products);
         setCategories(catalog.categories);
+        setCatalogTotal(catalog.total);
+        setCatalogPages(catalog.pages);
         setCatalogError("");
       } catch {
         if (mounted) {
-          setCatalogError("Unable to load the live catalog. Please try again.");
+          setCatalogError("Unable to load the catalog. Please check your connection.");
         }
+      } finally {
+        if (mounted) setCatalogLoading(false);
       }
     };
     void refreshCatalog();
-    // Removed: aggressive auto-refresh causing performance issues
-    // Only refresh on initial mount - admin can manually refresh if needed
-    return () => {
-      mounted = false;
-    };
-  }, []);
+    return () => { mounted = false; };
+  }, [catalogPage, catalogPageSize, activeCategory]);
   useEffect(() => {
     let active = true;
     const restoreCustomerSession = async () => {
@@ -1173,77 +1213,138 @@ function App() {
     setToast(message);
     window.setTimeout(() => setToast(""), 2500);
   };
-  const shown = useMemo(
-    () =>
-      products.filter(
-        (p) =>
-          `${p.name} ${p.code} ${p.brand} ${p.category} ${p.description} ${p.details}`
-            .toLowerCase()
-            .includes(query.toLowerCase()) &&
-          (activeCategory === "All" || p.category === activeCategory),
-      ),
-    [products, query, activeCategory],
-  );
-  const openProduct = (product: Product) => {
+  
+  // Backend search with loading and error states
+  const [searchResults, setSearchResults] = useState<Product[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const [searchTotal, setSearchTotal] = useState(0);
+  
+  const performSearch = async (query: string, category: string, page: number = 1) => {
+    if (!query.trim() && category === "All") {
+      setSearchResults([]);
+      setSearchError("");
+      return;
+    }
+    
+    setSearchLoading(true);
+    setSearchError("");
+    
+    try {
+      const params = new URLSearchParams();
+      if (query.trim()) params.set("q", query);
+      if (category !== "All") {
+        const cat = categories.find(c => c.name === category);
+        if (cat) params.set("categoryId", String(cat.id));
+      }
+      params.set("page", String(page));
+      params.set("limit", "48");
+      
+      const response = await fetchWithTimeout(`/api/search?${params.toString()}`);
+      if (!response.ok) throw new Error("Search failed");
+      
+      const result = await response.json();
+      setSearchResults(result.data || []);
+      setSearchTotal(result.total || 0);
+    } catch (error) {
+      console.error('[Search] Error:', error);
+      setSearchError(error instanceof Error ? error.message : "Unable to search products");
+      setSearchResults([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+  
+  // Perform search when debounced query or category changes
+  useEffect(() => {
+    if (screen === "products") {
+      performSearch(debouncedQuery, activeCategory, 1);
+    }
+  }, [debouncedQuery, activeCategory, screen]);
+  
+  // Use search results when searching, otherwise use all products
+  const shown = useMemo(() => {
+    const isSearching = debouncedQuery.trim() || activeCategory !== "All";
+    if (isSearching) {
+      return searchResults;
+    }
+    return products;
+  }, [products, debouncedQuery, activeCategory, searchResults]);
+  const openProduct = async (product: Product) => {
+    // Fetch fresh product data from server to ensure current stock/price
+    try {
+      const response = await fetchWithTimeout(`/api/products?search=${encodeURIComponent(product.code || product.name)}`);
+      if (response.ok) {
+        const result = await response.json();
+        const freshProduct = result.data?.find((p: Product) => p.id === product.id);
+        if (freshProduct) {
+          setSelected(freshProduct);
+          setScreen("detail");
+          window.scrollTo({ top: 0 });
+          return;
+        }
+      }
+    } catch (error) {
+      console.error('[Product] Failed to fetch fresh data:', error);
+    }
+    // Fallback to cached product if fetch fails
     setSelected(product);
     setScreen("detail");
     window.scrollTo({ top: 0 });
   };
   const addToCart = (product: Product) => {
-    try {
-      console.log('[addToCart] Adding product:', product);
-      
-      if (!product) {
-        console.error('[addToCart] Product is null or undefined');
-        notify("Unable to add to cart");
-        return;
-      }
-      
-      if (!product.stock || product.stock <= 0) {
-        console.log('[addToCart] Product out of stock:', product.stock);
-        notify("This product is currently out of stock");
-        return;
-      }
-      
-      console.log('[addToCart] Current cart:', cart);
-      
-      setCart((items) => {
-        const current = items.find((item) => item.product.id === product.id);
-        const nextCart = current
-          ? items.map((item) =>
-              item.product.id === product.id
-                ? { ...item, quantity: item.quantity + 1 }
-                : item,
-            )
-          : [...items, { product, quantity: 1 }];
-        
-        console.log('[addToCart] Updated cart:', nextCart);
-        return nextCart;
-      });
-      
-      notify("Added to cart");
-      console.log('[addToCart] Success!');
-    } catch (error) {
-      console.error('[addToCart] Error:', error);
-      notify("Unable to add to cart. Please try again.");
+    if (!product) { notify("Unable to add to cart"); return; }
+    if (!product.stock || product.stock <= 0) {
+      notify("This product is currently out of stock");
+      return;
     }
+    setCart((items) => {
+      const current = items.find((item) => item.product.id === product.id);
+      if (current) {
+        // Already at stock limit — do not exceed
+        if (current.quantity >= product.stock) {
+          notify("Maximum stock reached for this item");
+          return items; // no change
+        }
+        const newQuantity = Math.min(current.quantity + 1, product.stock);
+        notify("Quantity updated in cart");
+        return items.map((item) =>
+          item.product.id === product.id
+            ? { ...item, quantity: newQuantity }
+            : item,
+        );
+      }
+      notify("Added to cart");
+      return [...items, { product, quantity: 1 }];
+    });
   };
   const setCartQuantity = (product: Product, quantity: number) => {
-    if (!product.stock) return;
-    
-    // If quantity is 0 or less, remove item from cart
+    // Remove when quantity drops to 0 or below
     if (quantity <= 0) {
+      setCart((items) => {
+        const exists = items.some((item) => item.product.id === product.id);
+        if (exists) notify("Removed from cart");
+        return items.filter((item) => item.product.id !== product.id);
+      });
+      return;
+    }
+    // Cap at available stock
+    const maxQty = product.stock > 0 ? product.stock : 0;
+    const nextQuantity = Math.min(maxQty, Math.floor(quantity) || 1);
+    
+    if (nextQuantity === 0) {
+      notify("This product is out of stock");
       setCart((items) => items.filter((item) => item.product.id !== product.id));
       return;
     }
     
-    // Otherwise, update quantity (cap at stock level)
-    const nextQuantity = Math.min(product.stock, Math.floor(quantity) || 1);
+    if (nextQuantity < quantity) {
+      notify(`Quantity adjusted to available stock (${nextQuantity})`);
+    }
+    
     setCart((items) =>
       items.map((item) =>
-        item.product.id === product.id
-          ? { ...item, quantity: nextQuantity }
-          : item,
+        item.product.id === product.id ? { ...item, quantity: nextQuantity } : item,
       ),
     );
   };
@@ -1275,7 +1376,24 @@ function App() {
   return (
     <div className={screen === "admin" ? "app admin-mode" : "app"}>
       {catalogError && screen !== "admin" && (
-        <div className="toast">{catalogError}</div>
+        <div className="catalog-error-banner">
+          <span>{catalogError}</span>
+          <button
+            onClick={() => {
+              setCatalogError("");
+              setCatalogLoading(true);
+              loadCatalog()
+                .then((catalog) => {
+                  setProducts(catalog.products);
+                  setCategories(catalog.categories);
+                })
+                .catch(() => setCatalogError("Unable to load the catalog. Please check your connection."))
+                .finally(() => setCatalogLoading(false));
+            }}
+          >
+            Retry ↺
+          </button>
+        </div>
       )}
       {screen !== "admin" && (
         <Header
@@ -1324,6 +1442,15 @@ function App() {
           onProduct={openProduct}
           addToCart={addToCart}
           setCartQuantity={setCartQuantity}
+          searchLoading={searchLoading}
+          searchError={searchError}
+          searchTotal={searchTotal}
+          catalogPage={catalogPage}
+          setCatalogPage={setCatalogPage}
+          catalogPageSize={catalogPageSize}
+          setCatalogPageSize={setCatalogPageSize}
+          catalogTotal={catalogTotal}
+          catalogPages={catalogPages}
         />
       )}
       {screen === "detail" && selected && (
@@ -1476,7 +1603,7 @@ function Header({
   };
   return (
     <header className={`site-header${menuOpen ? " menu-open" : ""}`}>
-      <button className="logo-button" onClick={() => navigate(onHome)}>
+      <button className="logo-button" aria-label="Go to home page" onClick={() => navigate(onHome)}>
         <Logo />
       </button>
       <nav>
@@ -1496,10 +1623,10 @@ function Header({
             placeholder="Search products..."
           />
         </label>
-        <button className="header-cart" onClick={() => navigate(onCart)}>
+        <button className="header-cart" aria-label={`View cart with ${cartCount} items`} onClick={() => navigate(onCart)}>
           Cart <b>{cartCount.toString().padStart(2, "0")}</b>
         </button>
-        <button className="login-link" onClick={() => navigate(onLogin)}>
+        <button className="login-link" aria-label="Go to login page" onClick={() => navigate(onLogin)}>
           Login ↗
         </button>
         <button
@@ -1568,10 +1695,10 @@ function Home({
             from Murugesan Electrical and Hardwares, Tirupathur.
           </p>
           <div className="hero-actions">
-            <button className="button dark" onClick={onProducts}>
+            <button className="button dark" aria-label="Explore all products" onClick={onProducts}>
               Explore products ↘
             </button>
-            <button className="plain-button" onClick={onContact}>
+            <button className="plain-button" aria-label="Contact us" onClick={onContact}>
               Contact us ↗
             </button>
           </div>
@@ -1617,7 +1744,7 @@ function Home({
                   category.image ||
                   categoryImages[index % categoryImages.length]
                 }
-                alt=""
+                alt={`Category: ${category.name}`}
                 loading="lazy"
               />
               <span className="category-overlay" />
@@ -1687,6 +1814,15 @@ function ProductsPage({
   onProduct,
   addToCart,
   setCartQuantity,
+  searchLoading,
+  searchError,
+  searchTotal,
+  catalogPage,
+  setCatalogPage,
+  catalogPageSize,
+  setCatalogPageSize,
+  catalogTotal,
+  catalogPages,
 }: {
   products: Product[];
   categories: Category[];
@@ -1698,6 +1834,15 @@ function ProductsPage({
   onProduct: (p: Product) => void;
   addToCart: (p: Product) => void;
   setCartQuantity: (p: Product, quantity: number) => void;
+  searchLoading: boolean;
+  searchError: string;
+  searchTotal: number;
+  catalogPage: number;
+  setCatalogPage: (value: number) => void;
+  catalogPageSize: number;
+  setCatalogPageSize: (value: number) => void;
+  catalogTotal: number;
+  catalogPages: number;
 }) {
   return (
     <main className="page">
@@ -1720,11 +1865,13 @@ function ProductsPage({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search name, code, brand..."
+            disabled={searchLoading}
           />
         </label>
         <select
           value={activeCategory}
           onChange={(e) => setCategory(e.target.value)}
+          disabled={searchLoading}
         >
           <option>All</option>
           {categories.map((c) => (
@@ -1732,23 +1879,72 @@ function ProductsPage({
           ))}
         </select>
       </div>
-      <div className="product-grid">
-        {products.map((product) => (
-          <ProductCard
-            key={product.id}
-            product={product}
-            quantity={cart.find((item) => item.product.id === product.id)?.quantity || 0}
-            onProduct={onProduct}
-            addToCart={addToCart}
-            setCartQuantity={setCartQuantity}
-          />
-        ))}
-      </div>
-      {!products.length && (
+      {searchLoading && (
         <div className="empty-state">
-          <h2>No products found</h2>
-          <p>Try another search or browse a different category.</p>
+          <p>Searching products...</p>
         </div>
+      )}
+      {searchError && (
+        <div className="empty-state">
+          <h2>Search failed</h2>
+          <p>{searchError}</p>
+        </div>
+      )}
+      {!searchLoading && !searchError && (
+        <>
+          {(query || activeCategory !== "All") && (
+            <p style={{ padding: "8px 0", opacity: 0.7 }}>
+              {searchTotal} result{searchTotal !== 1 ? "s" : ""} found
+            </p>
+          )}
+          <div className="product-grid">
+            {products.map((product) => (
+              <ProductCard
+                key={product.id}
+                product={product}
+                quantity={cart.find((item) => item.product.id === product.id)?.quantity || 0}
+                onProduct={onProduct}
+                addToCart={addToCart}
+                setCartQuantity={setCartQuantity}
+              />
+            ))}
+          </div>
+          {!products.length && (
+            <div className="empty-state">
+              <h2>No products found</h2>
+              <p>Try another search or browse a different category.</p>
+            </div>
+          )}
+          {catalogPages > 1 && (
+            <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 16, marginTop: 24 }}>
+              <button
+                className="plain-button"
+                disabled={catalogPage === 1}
+                onClick={() => setCatalogPage(Math.max(1, catalogPage - 1))}
+              >
+                Prev
+              </button>
+              <span style={{ opacity: 0.7 }}>
+                Page {catalogPage} of {catalogPages} ({catalogTotal} products)
+              </span>
+              <button
+                className="plain-button"
+                disabled={catalogPage >= catalogPages}
+                onClick={() => setCatalogPage(Math.min(catalogPages, catalogPage + 1))}
+              >
+                Next
+              </button>
+              <select
+                value={catalogPageSize}
+                onChange={(e) => setCatalogPageSize(Number(e.target.value))}
+                style={{ marginLeft: 16, padding: 4 }}
+              >
+                <option value={24}>24 per page</option>
+                <option value={48}>48 per page</option>
+              </select>
+            </div>
+          )}
+        </>
       )}
     </main>
   );
@@ -1887,7 +2083,7 @@ function ProductCard({
           {product.brand || "Murugesan"}{" "}
           <span>{product.code || "NO CODE"}</span>
         </p>
-        <button className="product-name" onClick={() => onProduct(product)}>
+        <button className="product-name" aria-label={`View details for ${product.name}`} onClick={() => onProduct(product)}>
           {product.name}
         </button>
         <p className="product-description">{product.description}</p>
@@ -2002,7 +2198,7 @@ function Detail({
 }) {
   return (
     <main className="detail-page">
-      <button className="back-button" onClick={onBack}>
+      <button className="back-button" aria-label="Go back to products" onClick={onBack}>
         ← Back to products
       </button>
       <div className="detail-grid">
@@ -2044,7 +2240,7 @@ function Detail({
               Add to cart +
             </button>
           )}
-          <button className="whatsapp" onClick={() => whatsapp(product)}>
+          <button className="whatsapp" aria-label="Enquire about this product on WhatsApp" onClick={() => whatsapp(product)}>
             Enquire on WhatsApp ↗
           </button>
           <div className="spec-box">
@@ -2104,56 +2300,92 @@ function Cart({
   onProducts: () => void;
   onNotify: (message: string) => void;
 }) {
+  const [updating, setUpdating] = useState(false);
+  const [error, setError] = useState("");
+  
   const subtotal = items.reduce(
     (total, item) => total + item.product.price * item.quantity,
     0,
   );
+  
+  const updateQuantity = (product: Product, newQuantity: number) => {
+    setUpdating(true);
+    setError("");
+    try {
+      if (newQuantity <= 0) {
+        setCart(items.filter((item) => item.product.id !== product.id));
+        onNotify("Removed from cart");
+      } else {
+        const maxQty = product.stock > 0 ? product.stock : 0;
+        const finalQty = Math.min(maxQty, newQuantity);
+        
+        if (finalQty === 0) {
+          setCart(items.filter((item) => item.product.id !== product.id));
+          onNotify("Item removed (out of stock)");
+        } else if (finalQty < newQuantity) {
+          setCart(items.map((item) =>
+            item.product.id === product.id ? { ...item, quantity: finalQty } : item
+          ));
+          onNotify(`Quantity adjusted to available stock (${finalQty})`);
+        } else {
+          setCart(items.map((item) =>
+            item.product.id === product.id ? { ...item, quantity: finalQty } : item
+          ));
+        }
+      }
+    } catch (err) {
+      setError("Failed to update cart. Please try again.");
+    } finally {
+      setUpdating(false);
+    }
+  };
+  
   return (
     <main className="page cart-page">
       <p className="eyebrow">YOUR ENQUIRY</p>
       <h1>
         Cart <em>({items.length})</em>
       </h1>
+      {error && (
+        <div className="form-error" style={{ marginBottom: "16px" }}>
+          {error}
+          <button 
+            className="text-button" 
+            onClick={() => setError("")}
+            style={{ marginLeft: "8px" }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       {items.length ? (
         <>
           <div className="cart-list">
             {items.map(({ product, quantity }) => (
               <div className="cart-item" key={product.id}>
-                <img src={product.image || fallbackImage} alt="" />
+                <img src={product.image || fallbackImage} alt={`Product: ${product.name}`} />
                 <div>
                   <strong>{product.name}</strong>
                   <small>
                     {product.code} · {money(product.price)} / {product.unit}
                   </small>
+                  {product.stock === 0 && (
+                    <small style={{ color: "#d32f2f" }}>Out of stock</small>
+                  )}
                 </div>
                 <div className="quantity">
                   <button
-                    onClick={() =>
-                      setCart(
-                        items.map((item) =>
-                          item.product.id === product.id
-                            ? { ...item, quantity: Math.max(1, quantity - 1) }
-                            : item,
-                        ),
-                      )
-                    }
-                    disabled={quantity <= 1}
-                    style={{ opacity: quantity <= 1 ? 0.4 : 1, cursor: quantity <= 1 ? 'not-allowed' : 'pointer' }}
+                    onClick={() => updateQuantity(product, quantity - 1)}
+                    disabled={quantity <= 1 || updating}
+                    style={{ opacity: quantity <= 1 || updating ? 0.4 : 1, cursor: quantity <= 1 || updating ? 'not-allowed' : 'pointer' }}
                   >
                     −
                   </button>
                   <QuantityInput
                     initialQuantity={quantity}
                     stock={product.stock || 9999}
-                    onChange={(newQty) => {
-                      setCart(
-                        items.map((item) =>
-                          item.product.id === product.id
-                            ? { ...item, quantity: newQty }
-                            : item,
-                        ),
-                      );
-                    }}
+                    onChange={(newQty) => updateQuantity(product, newQty)}
+                    disabled={updating}
                     style={{
                       width: '60px',
                       textAlign: 'center',
@@ -2164,28 +2396,17 @@ function Cart({
                     }}
                   />
                   <button
-                    onClick={() =>
-                      setCart(
-                        items.map((item) =>
-                          item.product.id === product.id
-                            ? { ...item, quantity: Math.min(product.stock || 9999, quantity + 1) }
-                            : item,
-                        ),
-                      )
-                    }
-                    disabled={quantity >= (product.stock || 9999)}
-                    style={{ opacity: quantity >= (product.stock || 9999) ? 0.4 : 1, cursor: quantity >= (product.stock || 9999) ? 'not-allowed' : 'pointer' }}
+                    onClick={() => updateQuantity(product, quantity + 1)}
+                    disabled={quantity >= (product.stock || 9999) || updating}
+                    style={{ opacity: quantity >= (product.stock || 9999) || updating ? 0.4 : 1, cursor: quantity >= (product.stock || 9999) || updating ? 'not-allowed' : 'pointer' }}
                   >
                     +
                   </button>
                 </div>
                 <button
                   className="remove"
-                  onClick={() =>
-                    setCart(
-                      items.filter((item) => item.product.id !== product.id),
-                    )
-                  }
+                  onClick={() => updateQuantity(product, 0)}
+                  disabled={updating}
                 >
                   Remove
                 </button>
@@ -2242,7 +2463,7 @@ function Cart({
                 Sign in to save your delivery address and complete checkout
                 safely.
               </p>
-              <button className="button blue" onClick={onCustomerLogin}>
+              <button className="button blue" aria-label="Sign in or create account" onClick={onCustomerLogin}>
                 Sign in / create account
               </button>
             </section>
@@ -2252,7 +2473,7 @@ function Cart({
         <div className="empty-state">
           <h2>Your cart is empty</h2>
           <p>Add products to create an enquiry for the store.</p>
-          <button className="button dark" onClick={onProducts}>
+          <button className="button dark" aria-label="Browse products" onClick={onProducts}>
             Browse products
           </button>
         </div>
@@ -2535,7 +2756,7 @@ function BulkProductImport({
             code: product.code,
             categoryId,
             category: product.category,
-            productType: product.details || "",
+            productType: product.productType || "",
             imageUrl: product.image || null,
             imageUrls: product.image ? [product.image] : [],
             status: product.status === "Inactive" ? "INACTIVE" : "ACTIVE",
@@ -2627,7 +2848,7 @@ function BulkProductImport({
               </option>
             ))}
           </select>
-          <button className="button blue" onClick={downloadTemplate}>
+          <button className="button blue" aria-label="Download Excel template for bulk import" onClick={downloadTemplate}>
             Download Excel Template
           </button>
         </section>
@@ -2674,12 +2895,12 @@ function BulkProductImport({
             </div>
             <div>
               {errors.length > 0 && (
-                <button className="text-button" onClick={downloadErrors}>
+                <button className="text-button" aria-label="Download error report" onClick={downloadErrors}>
                   Download Error Report
                 </button>
               )}
               {items.length > 0 && (
-                <button className="button blue" onClick={importProducts}>
+                <button className="button blue" aria-label={`Import ${items.length} products`} onClick={importProducts}>
                   Import Products
                 </button>
               )}
@@ -2712,6 +2933,299 @@ function BulkProductImport({
         </section>
       )}
     </section>
+  );
+}
+function BrandManager({ notify }: { notify: (message: string) => void }) {
+  const [brands, setBrands] = useState<Brand[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
+
+  const loadBrands = async () => {
+    if (!apiToken) return;
+    setLoading(true);
+    try {
+      const response = await fetch("/api/brands", {
+        headers: { Authorization: `Bearer ${apiToken}` },
+      });
+      if (!response.ok) throw new Error("Unable to load brands");
+      setBrands(await response.json());
+    } catch {
+      notify("Unable to load brands");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadBrands();
+  }, [apiToken]);
+
+  const saveBrand = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+
+    try {
+      const response = await fetch("/api/brands", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiToken}`,
+        },
+        body: JSON.stringify({
+          name: name.trim(),
+          description: description.trim(),
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ error: "Failed to save brand" }));
+        throw new Error(error.error || "Failed to save brand");
+      }
+
+      await loadBrands();
+      setName("");
+      setDescription("");
+      notify("Brand added successfully");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Failed to add brand");
+    }
+  };
+
+  const archiveBrand = async (id: number) => {
+    if (!window.confirm("Archive this brand?")) return;
+
+    try {
+      const response = await fetch(`/api/brands/${id}/archive`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${apiToken}` },
+      });
+
+      if (!response.ok) throw new Error("Unable to archive brand");
+      await loadBrands();
+      notify("Brand archived");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Failed to archive brand");
+    }
+  };
+
+  const restoreBrand = async (id: number) => {
+    try {
+      const response = await fetch(`/api/brands/${id}/restore`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${apiToken}` },
+      });
+
+      if (!response.ok) throw new Error("Unable to restore brand");
+      await loadBrands();
+      notify("Brand restored");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Failed to restore brand");
+    }
+  };
+
+  return (
+    <>
+      <div className="admin-topline">
+        <div>
+          <p className="eyebrow">CATALOGUE / BRANDS</p>
+          <h1>Brands <span className="count-badge">{brands.length}</span></h1>
+          <p>Manage product brands for your store.</p>
+        </div>
+      </div>
+      <form className="inline-add" onSubmit={saveBrand}>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="New brand name"
+          required
+        />
+        <input
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="Description (optional)"
+        />
+        <button className="button blue">Add brand</button>
+      </form>
+      {loading ? (
+        <p>Loading brands...</p>
+      ) : brands.length ? (
+        <div className="category-admin-grid">
+          {brands.map((brand) => (
+            <div className="category-admin-card" key={brand.id}>
+              <span>◇</span>
+              <strong>{brand.name}</strong>
+              <small>{brand.productCount || 0} products</small>
+              {brand.status === "ARCHIVED" ? (
+                <button aria-label={`Restore brand: ${brand.name}`} onClick={() => void restoreBrand(brand.id)}>Restore</button>
+              ) : (
+                <button aria-label={`Archive brand: ${brand.name}`} onClick={() => void archiveBrand(brand.id)}>Archive</button>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p>No brands yet. Add your first brand above.</p>
+      )}
+    </>
+  );
+}
+function ProductTypeManager({ categories, notify }: { categories: Category[]; notify: (message: string) => void }) {
+  const [productTypes, setProductTypes] = useState<ProductType[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedCategory, setSelectedCategory] = useState("");
+  const [name, setName] = useState("");
+  const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
+
+  const loadProductTypes = async () => {
+    if (!apiToken) return;
+    setLoading(true);
+    try {
+      const response = await fetch("/api/product-types", {
+        headers: { Authorization: `Bearer ${apiToken}` },
+      });
+      if (!response.ok) throw new Error("Unable to load product types");
+      setProductTypes(await response.json());
+    } catch {
+      notify("Unable to load product types");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadProductTypes();
+  }, [apiToken]);
+
+  const saveProductType = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim() || !selectedCategory) return;
+
+    try {
+      const response = await fetch("/api/product-types", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiToken}`,
+        },
+        body: JSON.stringify({
+          categoryId: Number(selectedCategory),
+          name: name.trim(),
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ error: "Failed to save product type" }));
+        throw new Error(error.error || "Failed to save product type");
+      }
+
+      await loadProductTypes();
+      setName("");
+      notify("Product type added successfully");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Failed to add product type");
+    }
+  };
+
+  const archiveProductType = async (id: number) => {
+    if (!window.confirm("Archive this product type?")) return;
+
+    try {
+      const response = await fetch(`/api/product-types/${id}/archive`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${apiToken}` },
+      });
+
+      if (!response.ok) throw new Error("Unable to archive product type");
+      await loadProductTypes();
+      notify("Product type archived");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Failed to archive product type");
+    }
+  };
+
+  const restoreProductType = async (id: number) => {
+    try {
+      const response = await fetch(`/api/product-types/${id}/restore`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${apiToken}` },
+      });
+
+      if (!response.ok) throw new Error("Unable to restore product type");
+      await loadProductTypes();
+      notify("Product type restored");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Failed to restore product type");
+    }
+  };
+
+  const filteredTypes = selectedCategory
+    ? productTypes.filter(pt => pt.categoryId === Number(selectedCategory))
+    : productTypes;
+
+  const categoryName = (categoryId: number) => {
+    const cat = categories.find(c => c.id === categoryId);
+    return cat?.name || "Unknown";
+  };
+
+  return (
+    <>
+      <div className="admin-topline">
+        <div>
+          <p className="eyebrow">CATALOGUE / PRODUCT TYPES</p>
+          <h1>Product Types <span className="count-badge">{productTypes.length}</span></h1>
+          <p>Manage product types within categories.</p>
+        </div>
+      </div>
+      <form className="inline-add" onSubmit={saveProductType}>
+        <select
+          value={selectedCategory}
+          onChange={(e) => setSelectedCategory(e.target.value)}
+          required
+        >
+          <option value="">Select category</option>
+          {categories.filter(c => c.status !== "ARCHIVED").map((c) => (
+            <option key={c.id} value={c.id}>{c.name}</option>
+          ))}
+        </select>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="New product type name"
+          required
+        />
+        <button className="button blue">Add product type</button>
+      </form>
+      <div className="table-toolbar" style={{ margin: "16px 0" }}>
+        <select value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)}>
+          <option value="">All categories</option>
+          {categories.filter(c => c.status !== "ARCHIVED").map((c) => (
+            <option key={c.id} value={c.id}>{c.name}</option>
+          ))}
+        </select>
+      </div>
+      {loading ? (
+        <p>Loading product types...</p>
+      ) : filteredTypes.length ? (
+        <div className="category-admin-grid">
+          {filteredTypes.map((pt) => (
+            <div className="category-admin-card" key={pt.id}>
+              <span>◇</span>
+              <strong>{pt.name}</strong>
+              <small>{categoryName(pt.categoryId)} · {pt.productCount || 0} products</small>
+              {pt.status === "ARCHIVED" ? (
+                <button aria-label={`Restore product type: ${pt.name}`} onClick={() => void restoreProductType(pt.id)}>Restore</button>
+              ) : (
+                <button aria-label={`Archive product type: ${pt.name}`} onClick={() => void archiveProductType(pt.id)}>Archive</button>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p>No product types found. Select a category and add your first product type above.</p>
+      )}
+    </>
   );
 }
 function Admin({
@@ -2781,6 +3295,8 @@ function Admin({
             "Products",
             "Bulk Import",
             "Categories",
+            "Brands",
+            "Product Types",
             "Inventory",
             "Orders / Enquiries",
             "Customers",
@@ -2825,6 +3341,10 @@ function Admin({
               products={products}
               notify={notify}
             />
+          ) : view === "Brands" ? (
+            <BrandManager notify={notify} />
+          ) : view === "Product Types" ? (
+            <ProductTypeManager categories={categories} notify={notify} />
           ) : view === "Customers" ? (
             <AdminCustomersList notify={notify} />
           ) : view === "Settings" ? (
@@ -2835,10 +3355,8 @@ function Admin({
             <>
               <AdminDashboard
                 view={view}
-                products={products}
-                categories={categories}
                 onAdd={() => setEditing(emptyProduct(categories))}
-                onProducts={() => setView("Products")}
+                setAdminView={setView}
               />
               <AdminExtras
                 products={products}
@@ -2877,18 +3395,13 @@ function emptyProduct(categories: Category[]): Product {
 }
 function AdminDashboard({
   view,
-  products,
-  categories,
   onAdd,
-  onProducts,
+  setAdminView,
 }: {
   view: string;
-  products: Product[];
-  categories: Category[];
   onAdd: () => void;
-  onProducts: () => void;
+  setAdminView: (view: string) => void;
 }) {
-  void onProducts;
   const [stats, setStats] = useState<{
     products: number;
     categories: number;
@@ -2896,22 +3409,54 @@ function AdminDashboard({
     customers: number;
     orders: number;
     revenue: number;
+    todayRevenue: number;
+    todayOrders: number;
+    pendingOrders: number;
+    confirmedOrders: number;
+    processingOrders: number;
+    deliveredOrders: number;
+    cancelledOrders: number;
+    lowStock: number;
+    outOfStock: number;
   } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
   
-  useEffect(() => {
+  const fetchStats = () => {
     if (!apiToken || view !== "Dashboard") return;
+    setLoading(true);
+    setError("");
     fetch("/api/admin/stats", {
       headers: { Authorization: `Bearer ${apiToken}` },
     })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data) setStats(data);
+      .then((res) => {
+        if (!res.ok) throw new Error("Failed to fetch stats");
+        return res.json();
       })
-      .catch(() => {});
+      .then((data) => {
+        setStats(data);
+      })
+      .catch((err) => {
+        setError("Failed to load dashboard stats");
+        console.error("Stats fetch error:", err);
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  };
+  
+  useEffect(() => {
+    fetchStats();
   }, [apiToken, view]);
+  
+  // Auto-refresh every 30 seconds
+  useEffect(() => {
+    if (view !== "Dashboard") return;
+    const interval = setInterval(fetchStats, 30000);
+    return () => clearInterval(interval);
+  }, [view]);
 
-  const low = products.filter((p) => p.stock > 0 && p.stock < 10).length;
   const currentDate = new Date().toLocaleDateString('en-GB', { 
     day: '2-digit', 
     month: 'short', 
@@ -2926,7 +3471,7 @@ function AdminDashboard({
           <h1>
             {view === "Dashboard" ? (
               <>
-                Good morning, Murugasan <em>✦</em>
+                Dashboard <em>✦</em>
               </>
             ) : (
               view
@@ -2935,33 +3480,56 @@ function AdminDashboard({
           <p>Manage your store from one place.</p>
         </div>
         {view === "Dashboard" && (
-          <button className="button blue" onClick={onAdd}>
-            + Add Product
-          </button>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button className="button light" onClick={fetchStats} disabled={loading}>
+              {loading ? "Refreshing..." : "Refresh"}
+            </button>
+            <button className="button blue" onClick={onAdd}>
+              + Add Product
+            </button>
+          </div>
         )}
       </div>
       {view === "Dashboard" ? (
-        <div className="stats-grid">
-          <Stat label="Total products" value={stats?.products ?? products.length} />
-          <Stat
-            label="Active products"
-            value={
-              products.filter((p) => p.stock > 0 && p.status !== "Inactive")
-                .length
-            }
-          />
-          <Stat label="Low stock" value={low} warning />
-          <Stat
-            label="Out of stock"
-            value={products.filter((p) => p.stock === 0).length}
-            warning
-          />
-          <Stat
-            label="Active categories"
-            value={stats?.categories ?? categories.filter((category) => category.active !== false).length}
-          />
-          <Stat label="Orders" value={stats?.orders ?? 0} />
-        </div>
+        <>
+          {error && (
+            <div className="form-error" style={{ marginBottom: "16px" }}>
+              {error}
+            </div>
+          )}
+          <div className="stats-grid">
+            <Stat label="Today's Orders" value={stats?.todayOrders ?? 0} />
+            <Stat label="Pending Orders" value={stats?.pendingOrders ?? 0} warning={(stats?.pendingOrders ?? 0) > 0} />
+            <Stat label="Confirmed Orders" value={stats?.confirmedOrders ?? 0} />
+            <Stat label="Processing Orders" value={stats?.processingOrders ?? 0} />
+            <Stat label="Delivered Orders" value={stats?.deliveredOrders ?? 0} />
+            <Stat label="Cancelled Orders" value={stats?.cancelledOrders ?? 0} warning={(stats?.cancelledOrders ?? 0) > 0} />
+            <Stat label="Today's Revenue" value={stats?.todayRevenue ?? 0} />
+            <Stat label="Total Revenue" value={stats?.revenue ?? 0} />
+            <Stat label="Total Products" value={stats?.products ?? 0} />
+            <Stat label="Low Stock" value={stats?.lowStock ?? 0} warning={(stats?.lowStock ?? 0) > 0} />
+            <Stat label="Out of Stock" value={stats?.outOfStock ?? 0} warning={(stats?.outOfStock ?? 0) > 0} />
+            <Stat label="Total Customers" value={stats?.customers ?? 0} />
+          </div>
+          
+          <div className="stats-grid" style={{ marginTop: "24px" }}>
+            <button className="button light" onClick={() => setAdminView("Products")}>
+              Manage Products
+            </button>
+            <button className="button light" onClick={() => setAdminView("Categories")}>
+              Manage Categories
+            </button>
+            <button className="button light" onClick={() => setAdminView("Orders")}>
+              View Orders
+            </button>
+            <button className="button light" onClick={() => setAdminView("Products")}>
+              Inventory
+            </button>
+            <button className="button light" onClick={() => setAdminView("Settings")}>
+              Settings
+            </button>
+          </div>
+        </>
       ) : (
         <section className="panel empty-admin">
           <h2>{view}</h2>
@@ -3357,7 +3925,7 @@ function AdminProducts({
   const [totalPages, setTotalPages] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(false);
-  const PAGE_SIZE = 50;
+  const [pageSize, setPageSize] = useState(50);
   const [inlineStockDrafts, setInlineStockDrafts] = useState<Record<number, string>>({});
   const [savingStock, setSavingStock] = useState<Record<number, boolean>>({});
 
@@ -3368,7 +3936,7 @@ function AdminProducts({
   }, [searchInput]);
 
   // Reset to page 1 whenever filters change
-  useEffect(() => { setPage(1); }, [search, category, status, sortBy, sortOrder]);
+  useEffect(() => { setPage(1); }, [search, category, status, sortBy, sortOrder, pageSize]);
 
   // Server-side fetch
   useEffect(() => {
@@ -3376,7 +3944,7 @@ function AdminProducts({
     setLoading(true);
     const params = new URLSearchParams();
     params.set("page", String(page));
-    params.set("limit", String(PAGE_SIZE));
+    params.set("limit", String(pageSize));
     params.set("sortBy", sortBy);
     params.set("sortOrder", sortOrder);
     if (search) params.set("search", search);
@@ -3523,7 +4091,7 @@ function AdminProducts({
         {products.map((p) => (
           <div className="table-row" key={p.id}>
             <span className="table-product">
-              <img src={p.image || fallbackImage} alt="" />
+              <img src={p.image || fallbackImage} alt={`Product: ${p.name}`} />
               <strong>
                 {p.name}
                 <small>{p.code}</small>
@@ -3624,6 +4192,15 @@ function AdminProducts({
           >
             Next
           </button>
+          <select
+            value={pageSize}
+            onChange={(e) => setPageSize(Number(e.target.value))}
+            style={{ marginLeft: 16, padding: 4 }}
+          >
+            <option value={25}>25 per page</option>
+            <option value={50}>50 per page</option>
+            <option value={100}>100 per page</option>
+          </select>
         </div>
       )}
       {editing && (
@@ -3674,6 +4251,7 @@ function ProductForm({
   const [uploading, setUploading] = useState(false);
   const [brands, setBrands] = useState<Brand[]>([]);
   const [productTypes, setProductTypes] = useState<ProductType[]>([]);
+  const [productTypeAttributes, setProductTypeAttributes] = useState<CategoryAttribute[]>([]);
   const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
   
   // Load brands on mount and when needed
@@ -3701,8 +4279,25 @@ function ProductForm({
       .catch(() => setProductTypes([]));
   }, [apiToken, selectedCategoryId]);
   
-  // Get category attributes for dynamic form fields
-  const categoryAttributes = selectedCategory?.attributes || [];
+  // Load product-type-specific attributes when product type changes
+  useEffect(() => {
+    if (!apiToken || !form.productTypeId) {
+      setProductTypeAttributes([]);
+      return;
+    }
+    fetch(`/api/attributes?productTypeId=${form.productTypeId}`, {
+      headers: { Authorization: `Bearer ${apiToken}` },
+    })
+      .then(res => res.ok ? res.json() : [])
+      .then((data: CategoryAttribute[]) => setProductTypeAttributes(data))
+      .catch(() => setProductTypeAttributes([]));
+  }, [apiToken, form.productTypeId]);
+  
+  // Get category attributes for dynamic form fields (only category-level, not product-type-specific)
+  const categoryAttributes = (selectedCategory?.attributes || []).filter(
+    attr => !productTypeAttributes.some(ptAttr => ptAttr.name === attr.name)
+  );
+  const allAttributes = [...categoryAttributes, ...productTypeAttributes];
   const productAttributes = form.attributes || {};
   
   const updateAttribute = (attributeName: string, value: string | string[]) => {
@@ -3993,11 +4588,11 @@ function ProductForm({
             </label>
           </div>
         )}
-        {categoryAttributes.length > 0 && (
+        {allAttributes.length > 0 && (
           <>
-            <h3>Category Attributes</h3>
+            <h3>Attributes</h3>
             <div className="attributes-grid">
-              {categoryAttributes.map((attr) => (
+              {allAttributes.map((attr) => (
                 <label key={attr.id}>
                   {attr.name} {attr.required ? "*" : ""}
                   {attr.type === 'Dropdown' || attr.type === 'Radio Button' ? (
@@ -4211,6 +4806,83 @@ function LegacyAdminCategories({
   );
 }
 function AdminSettings({ notify }: { notify: (message: string) => void }) {
+  const [settings, setSettings] = useState<{
+    businessName: string;
+    phone: string;
+    gstin: string;
+    address: string;
+    logo: string;
+  }>({
+    businessName: "",
+    phone: "",
+    gstin: "",
+    address: "",
+    logo: "",
+  });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const apiToken = sessionStorage.getItem("murugesan-auth-token") || "";
+  
+  const loadSettings = async () => {
+    if (!apiToken) return;
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch("/api/admin/settings", {
+        headers: { Authorization: `Bearer ${apiToken}` },
+      });
+      if (!response.ok) throw new Error("Unable to load settings");
+      const data = await response.json();
+      setSettings({
+        businessName: data.businessName || "",
+        phone: data.phone || "",
+        gstin: data.gstin || "",
+        address: data.address || "",
+        logo: data.logo || "",
+      });
+    } catch (err) {
+      setError("Failed to load settings");
+      console.error("Settings load error:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  const saveSettings = async () => {
+    if (!apiToken) return;
+    setSaving(true);
+    setError("");
+    try {
+      const response = await fetch("/api/admin/settings", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiToken}`,
+        },
+        body: JSON.stringify({
+          businessName: settings.businessName,
+          phone: settings.phone,
+          gstin: settings.gstin,
+          address: settings.address,
+          logo: settings.logo,
+        }),
+      });
+      if (!response.ok) throw new Error("Unable to save settings");
+      notify("Settings saved successfully");
+    } catch (err) {
+      setError("Failed to save settings");
+      console.error("Settings save error:", err);
+      notify("Failed to save settings");
+    } finally {
+      setSaving(false);
+    }
+  };
+  
+  useEffect(() => {
+    loadSettings();
+  }, [apiToken]);
+  
   return (
     <>
       <div className="admin-topline">
@@ -4221,32 +4893,52 @@ function AdminSettings({ notify }: { notify: (message: string) => void }) {
         </div>
       </div>
       <section className="panel settings">
-        <label>
-          Business Name
-          <input defaultValue="Murugesan Electrical and Hardwares - Tirupathur" />
-        </label>
-        <label>
-          Phone
-          <input defaultValue="9361866771" />
-        </label>
-        <label>
-          GSTIN
-          <input defaultValue="33APCPM6660B1Z9" />
-        </label>
-        <label>
-          Address
-          <textarea
-            defaultValue={
-              "Andiappanur Sub Post Office\nSf.No.163, 1A4 Main Road\nKurisilapattu Post\nAndiyappanur, Tirupathur - 635702"
-            }
-          />
-        </label>
-        <button
-          className="button blue"
-          onClick={() => notify("Business settings saved")}
-        >
-          Save settings
-        </button>
+        {loading ? (
+          <p>Loading settings...</p>
+        ) : (
+          <>
+            {error && <div className="form-error">{error}</div>}
+            <label>
+              Business Name
+              <input
+                value={settings.businessName}
+                onChange={(e) => setSettings({ ...settings, businessName: e.target.value })}
+                disabled={saving}
+              />
+            </label>
+            <label>
+              Phone
+              <input
+                value={settings.phone}
+                onChange={(e) => setSettings({ ...settings, phone: e.target.value })}
+                disabled={saving}
+              />
+            </label>
+            <label>
+              GSTIN
+              <input
+                value={settings.gstin}
+                onChange={(e) => setSettings({ ...settings, gstin: e.target.value })}
+                disabled={saving}
+              />
+            </label>
+            <label>
+              Address
+              <textarea
+                value={settings.address}
+                onChange={(e) => setSettings({ ...settings, address: e.target.value })}
+                disabled={saving}
+              />
+            </label>
+            <button
+              className="button blue"
+              onClick={saveSettings}
+              disabled={saving}
+            >
+              {saving ? "Saving..." : "Save settings"}
+            </button>
+          </>
+        )}
       </section>
     </>
   );
@@ -4267,6 +4959,11 @@ function CustomerCheckout({
   const [gstNumber, setGstNumber] = useState("");
   const [message, setMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [validating, setValidating] = useState(false);
+  const [validationError, setValidationError] = useState("");
+  const [whatsappUrl, setWhatsappUrl] = useState("");
+  const [whatsappFailed, setWhatsappFailed] = useState(false);
+  const [notificationId, setNotificationId] = useState<number | null>(null);
   const idempotencyKey = useRef("");
   useEffect(() => {
     fetch("/api/me/addresses", {
@@ -4281,12 +4978,78 @@ function CustomerCheckout({
         setGstNumber(defaultAddress?.gstNumber || "");
       });
   }, [token]);
+  
+  // Validate inventory before checkout
+  const validateInventory = async () => {
+    setValidating(true);
+    setValidationError("");
+    
+    try {
+      const productIds = items.map(({ product }) => product.id);
+      const response = await fetch("/api/products/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: productIds }),
+      });
+      
+      if (!response.ok) throw new Error("Failed to validate inventory");
+      
+      const validatedProducts = await response.json();
+      const productMap = new Map(validatedProducts.map((p: Product) => [p.id, p]));
+      
+      let hasChanges = false;
+      let outOfStockItems: string[] = [];
+      
+      for (const item of items) {
+        const currentProduct = productMap.get(item.product.id);
+        if (!currentProduct) {
+          outOfStockItems.push(item.product.name);
+          hasChanges = true;
+          continue;
+        }
+        
+        if ((currentProduct as Product).stock === 0) {
+          outOfStockItems.push(item.product.name);
+          hasChanges = true;
+        } else if (item.quantity > (currentProduct as Product).stock) {
+          hasChanges = true;
+        }
+      }
+      
+      if (outOfStockItems.length > 0) {
+        setValidationError(
+          `The following items are out of stock: ${outOfStockItems.join(", ")}. Please remove them from your cart.`
+        );
+        return false;
+      }
+      
+      if (hasChanges) {
+        setValidationError(
+          "Some items in your cart have limited stock. Please review your cart before checkout."
+        );
+        return false;
+      }
+      
+      return true;
+    } catch (error) {
+      setValidationError("Unable to validate inventory. Please check your connection and try again.");
+      return false;
+    } finally {
+      setValidating(false);
+    }
+  };
+  
   const placeOrder = async () => {
-    if (submitting) return;
+    if (submitting || validating) return;
     if (!items.length) {
       setMessage("Add at least one product to place an order");
       return;
     }
+    
+    // Validate inventory before proceeding
+    const isValid = await validateInventory();
+    if (!isValid) return;
+    
     const address = addresses.find((item) => String(item.id) === selected);
     if (!address) {
       setMessage("Please select a delivery address");
@@ -4346,21 +5109,42 @@ function CustomerCheckout({
         return;
       }
 
-      const whatsappUrl = String(rawResult.whatsappUrl || "").trim();
+      const responseWhatsappUrl = String(rawResult.whatsappUrl || "").trim();
+      const responseOrder = rawResult.order;
+      const responseNotificationId = rawResult.notificationId || null;
       
-      if (!whatsappUrl) {
-        setMessage("Order placed successfully, but WhatsApp could not be opened. Please contact the shop.");
-        onComplete(items.map(({ product }) => product.id));
+      // Order created successfully
+      setWhatsappUrl(responseWhatsappUrl);
+      setNotificationId(responseNotificationId);
+      onComplete(items.map(({ product }) => product.id));
+      
+      if (!responseWhatsappUrl) {
+        setWhatsappFailed(true);
+        setMessage(`Order ${responseOrder?.order_number || ''} was created successfully, but WhatsApp could not be opened.`);
         return;
       }
 
-      // Order created successfully, clear cart and open WhatsApp
-      onComplete(items.map(({ product }) => product.id));
+      // Try to open WhatsApp
       setMessage("Opening WhatsApp...");
-      
-      const opened = openWhatsAppUrl(whatsappUrl);
+      const opened = openWhatsAppUrl(responseWhatsappUrl);
       if (!opened) {
-        setMessage("Order placed successfully, but WhatsApp could not be opened. Please contact the shop.");
+        setWhatsappFailed(true);
+        setMessage(`Order ${responseOrder?.order_number || ''} was created successfully, but WhatsApp could not be opened.`);
+      } else {
+        // WhatsApp opened successfully - update notification status
+        if (responseNotificationId) {
+          fetch(`/api/notifications/${responseNotificationId}/status`, {
+            method: 'PATCH',
+            headers: { 
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${token}`
+            },
+            body: JSON.stringify({ status: 'OPENED' })
+          }).catch(() => {
+            // Ignore errors updating notification status
+          });
+        }
+        setMessage("Order placed successfully! WhatsApp opened.");
       }
     } catch (error) {
       clearTimeout(timeoutId);
@@ -4416,9 +5200,9 @@ function CustomerCheckout({
           <button
             className="button blue"
             onClick={() => void placeOrder()}
-            disabled={!items.length || submitting}
+            disabled={!items.length || submitting || validating}
           >
-            {submitting ? "PLACING ORDER..." : "PLACE ORDER"}
+            {submitting || validating ? "PLACING ORDER..." : "PLACE ORDER"}
           </button>
         </>
       ) : (
@@ -4432,6 +5216,35 @@ function CustomerCheckout({
         </>
       )}
       {message && <p className="form-error">{message}</p>}
+      {validationError && <p className="form-error">{validationError}</p>}
+      {validating && <p className="form-info">Validating inventory...</p>}
+      {whatsappFailed && whatsappUrl && (
+        <button
+          className="button light"
+          onClick={() => {
+            const opened = openWhatsAppUrl(whatsappUrl);
+            if (opened) {
+              setWhatsappFailed(false);
+              setMessage("WhatsApp opened successfully!");
+              if (notificationId) {
+                fetch(`/api/notifications/${notificationId}/status`, {
+                  method: 'PATCH',
+                  headers: { 
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`
+                  },
+                  body: JSON.stringify({ status: 'OPENED' })
+                }).catch(() => {
+                  // Ignore errors updating notification status
+                });
+              }
+            }
+          }}
+          style={{ marginTop: "12px" }}
+        >
+          Try WhatsApp Again
+        </button>
+      )}
     </section>
   );
 }

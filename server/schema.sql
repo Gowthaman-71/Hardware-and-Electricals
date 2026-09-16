@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS orders (
   notification_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (notification_status IN ('PENDING', 'PREPARED', 'SENT', 'FAILED')),
   notification_sent_at TEXT,
   notification_message_id TEXT,
+  stock_restored INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -133,6 +134,7 @@ CREATE TABLE IF NOT EXISTS product_types (
 CREATE TABLE IF NOT EXISTS attributes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+  product_type_id INTEGER REFERENCES product_types(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
   type TEXT NOT NULL,
   required INTEGER NOT NULL DEFAULT 0,
@@ -143,7 +145,7 @@ CREATE TABLE IF NOT EXISTS attributes (
   sort_order INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  UNIQUE(category_id, name)
+  UNIQUE(category_id, product_type_id, name)
 );
 
 CREATE TABLE IF NOT EXISTS products (
@@ -173,16 +175,24 @@ CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand_id);
 CREATE INDEX IF NOT EXISTS idx_products_type ON products(product_type_id);
 CREATE INDEX IF NOT EXISTS idx_products_status_created ON products(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_products_name ON products(name COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_products_stock ON products(stock);
+CREATE INDEX IF NOT EXISTS idx_products_category_status ON products(category_id, status);
+CREATE INDEX IF NOT EXISTS idx_products_brand_status ON products(brand_id, status);
+CREATE INDEX IF NOT EXISTS idx_products_status_stock ON products(status, stock);
+CREATE INDEX IF NOT EXISTS idx_products_search ON products(name COLLATE NOCASE, sku COLLATE NOCASE);
 
 CREATE TABLE IF NOT EXISTS import_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('PENDING', 'PROCESSING', 'COMPLETED', 'FAILED')),
   total_rows INTEGER NOT NULL DEFAULT 0,
   processed_rows INTEGER NOT NULL DEFAULT 0,
   valid_rows INTEGER NOT NULL DEFAULT 0,
   error_rows INTEGER NOT NULL DEFAULT 0,
   errors_json TEXT NOT NULL DEFAULT '[]',
+  file_path TEXT,
   created_by INTEGER REFERENCES users(id),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_import_jobs_status ON import_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_import_jobs_created_by ON import_jobs(created_by);

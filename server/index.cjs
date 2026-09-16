@@ -9,6 +9,38 @@ const { DatabaseSync } = require('node:sqlite');
 const { createPgCompatDatabase } = require('./postgresCompat.cjs');
 const security = require('./security.cjs');
 
+// Simple in-memory cache with TTL for static data (categories, brands, product types)
+class SimpleCache {
+  constructor(ttlSeconds = 300) {
+    this.cache = new Map();
+    this.ttl = ttlSeconds * 1000;
+  }
+  
+  set(key, value) {
+    this.cache.set(key, { value, expires: Date.now() + this.ttl });
+  }
+  
+  get(key) {
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.expires) {
+      this.cache.delete(key);
+      return null;
+    }
+    return entry.value;
+  }
+  
+  clear() {
+    this.cache.clear();
+  }
+  
+  delete(key) {
+    this.cache.delete(key);
+  }
+}
+
+const staticDataCache = new SimpleCache(300); // 5 minute cache for categories, brands, product types
+
 const root = path.resolve(__dirname, '..');
 const runtimeEnvPath = path.join(root, '.env');
 if (fs.existsSync(runtimeEnvPath)) {
@@ -27,6 +59,26 @@ const seedDemoDataEnabled = String(process.env.SEED_DEMO_DATA || '').trim().toLo
 const productionDatabaseUrl = process.env.DATABASE_URL || null;
 const productionUploadDirectory = path.resolve(root, 'server/uploads');
 const renderWritableUploadDirectory = '/tmp/uploads';
+
+// CDN Configuration for image storage
+const cdnBaseUrl = process.env.CDN_BASE_URL || null; // e.g., https://your-bucket.s3.amazonaws.com/uploads/
+const useCdn = cdnBaseUrl && cdnBaseUrl.trim() !== '';
+
+// Helper function to convert local file paths to CDN URLs
+function getImageUrl(imagePath) {
+  if (!imagePath) return null;
+  if (useCdn && imagePath.startsWith('/uploads/')) {
+    // Convert local path to CDN URL
+    const filename = imagePath.replace('/uploads/', '');
+    return `${cdnBaseUrl}${filename}`;
+  }
+  if (useCdn && !imagePath.startsWith('http')) {
+    // Assume it's a relative path
+    return `${cdnBaseUrl}${imagePath}`;
+  }
+  // Return original path (local or already absolute URL)
+  return imagePath;
+}
 
 if (isProduction && !productionDatabaseUrl) {
   throw new Error('Production requires DATABASE_URL to be configured. SQLite is not allowed in production.');
@@ -451,9 +503,11 @@ const buildOwnerOrderNotificationMessage = (order) => {
     const name = String(item.productName || item.name || 'Item').trim() || 'Item';
     const quantity = Number(item.quantity || 0);
     const price = formatCurrency(item.unitPrice ?? item.price ?? 0);
-    return `- ${name}, Qty: ${quantity}, Price: ${price}`;
+    const itemTotal = formatCurrency(price.replace(/[₹,]/g, '') * quantity);
+    return `- ${name} x${quantity} @ ${price} = ${itemTotal}`;
   }).join('\n');
   const gst = String(order.gst_number || '').trim();
+  const subtotal = formatCurrency(order.subtotal || 0);
   return [
     'Hello Murugesan Electrical and Hardwares, I have placed an order.',
     '',
@@ -468,6 +522,7 @@ const buildOwnerOrderNotificationMessage = (order) => {
     'Items:',
     items || '- No items',
     '',
+    `Subtotal: ${subtotal}`,
     `Total: ${formatCurrency(order.total)}`,
     '',
     'Please confirm my order.',
@@ -482,12 +537,12 @@ async function createOrderNotification({ order, type, recipient, status }) {
     : (buildOrderNotificationMessage(order, status) || `${type} ${order.order_number || ''}`.trim());
   const insert = db.prepare('INSERT INTO order_notifications (order_id,customer_id,type,channel,message,recipient,status,created_at) VALUES (?,?,?,?,?,?,?,?)');
   if (!destination) {
-    const result = insert.run(order.id, order.customer_id, type, 'WHATSAPP', message, '', 'PENDING', timestamp);
+    const result = insert.run(order.id, order.customer_id, type, 'WHATSAPP', message, '', 'FAILED', timestamp);
     db.prepare('UPDATE order_notifications SET error_message = ? WHERE id = ?').run('WhatsApp recipient is missing', result.lastInsertRowid);
     return { notificationId: Number(result.lastInsertRowid), whatsappUrl: '', destination: '' };
   }
   const whatsappUrl = buildWhatsAppUrl(destination, message);
-  const result = insert.run(order.id, order.customer_id, type, 'WHATSAPP', message, destination, 'PREPARED', timestamp);
+  const result = insert.run(order.id, order.customer_id, type, 'WHATSAPP', message, destination, 'NOT_ATTEMPTED', timestamp);
   return { notificationId: Number(result.lastInsertRowid), whatsappUrl, destination };
 }
 
@@ -506,14 +561,15 @@ const mapCategory = (row, attributes = []) => row ? {
   name: String(row.name || ''),
   slug: String(row.slug || ''),
   parentId: row.parent_id == null ? null : Number(row.parent_id),
-  image: row.image_url || '',
-  imageUrl: row.image_url || null,
+  image: getImageUrl(row.image_url) || '',
+  imageUrl: getImageUrl(row.image_url) || null,
   description: row.description || '',
   status: row.status || 'ACTIVE',
   sortOrder: Number(row.sort_order || 0),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   attributes: Array.isArray(attributes) ? attributes.map(mapAttribute) : [],
+  active: row.status === 'ACTIVE',
 } : null;
 const mapBrand = (row) => row ? {
   id: Number(row.id),
@@ -550,29 +606,27 @@ const mapAttribute = (row) => row ? {
 } : null;
 const mapProduct = (row) => row ? {
   id: Number(row.id),
-  sku: String(row.sku || ''),
   code: String(row.sku || ''),
+  sku: String(row.sku || ''),
   name: String(row.name || ''),
-  category: String(row.category_name || row.category || ''),
-  categoryId: row.category_id == null ? null : Number(row.category_id),
-  brand: String(row.brand_name || row.brand || ''),
+  slug: String(row.slug || ''),
+  category: String(row.category_name || ''),
+  categoryId: Number(row.category_id || 0),
+  categorySlug: String(row.category_slug || ''),
+  brand: String(row.brand_name || ''),
   brandId: row.brand_id == null ? null : Number(row.brand_id),
   productType: String(row.product_type_name || ''),
   productTypeId: row.product_type_id == null ? null : Number(row.product_type_id),
-  price: Number(row.price || 0),
-  mrp: Number(row.mrp || row.price || 0),
-  discount: Number(row.discount || 0),
-  stock: Number(row.stock || 0),
   unit: String(row.unit || 'Nos'),
   description: row.description || '',
   details: row.details || '',
-  image: row.image_url || '',
-  imageUrl: row.image_url || null,
+  image: getImageUrl(row.image_url) || '',
+  imageUrl: getImageUrl(row.image_url) || null,
   status: row.status || 'ACTIVE',
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   attributes: safeJson(row.attributes_json, {}),
-  imageUrls: safeJson(row.image_urls_json, []),
+  imageUrls: safeJson(row.image_urls_json, []).map(img => getImageUrl(img)),
 } : null;
 const mapAddress = (row) => row ? {
   id: Number(row.id),
@@ -659,6 +713,7 @@ function applyDatabaseMigrations() {
   ensureColumn('product_types', 'updated_at', 'updated_at TEXT NOT NULL DEFAULT "1970-01-01T00:00:00.000Z"');
   ensureColumn('attributes', 'created_at', 'created_at TEXT NOT NULL DEFAULT "1970-01-01T00:00:00.000Z"');
   ensureColumn('attributes', 'updated_at', 'updated_at TEXT NOT NULL DEFAULT "1970-01-01T00:00:00.000Z"');
+  ensureColumn('attributes', 'product_type_id', 'product_type_id INTEGER REFERENCES product_types(id) ON DELETE CASCADE');
   if (db.prepare("PRAGMA table_info(orders)").all().length) {
     ensureColumn('orders', 'order_number', 'order_number TEXT');
     ensureColumn('orders', 'customer_email', 'customer_email TEXT DEFAULT ""');
@@ -670,10 +725,20 @@ function applyDatabaseMigrations() {
     ensureColumn('orders', 'notification_status', 'notification_status TEXT DEFAULT "PENDING"');
     ensureColumn('orders', 'notification_sent_at', 'notification_sent_at TEXT');
     ensureColumn('orders', 'notification_message_id', 'notification_message_id TEXT');
+    ensureColumn('orders', 'stock_restored', 'stock_restored INTEGER DEFAULT 0');
   }
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_mobile_number ON users(mobile_number) WHERE mobile_number IS NOT NULL');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_order_number ON orders(order_number) WHERE order_number IS NOT NULL');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idempotency_key ON orders(idempotency_key) WHERE idempotency_key IS NOT NULL');
+  
+  // Add performance indexes for large catalogs
+  db.exec('CREATE INDEX IF NOT EXISTS idx_products_stock ON products(stock)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_products_category_status ON products(category_id, status)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_products_brand_status ON products(brand_id, status)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_products_status_stock ON products(status, stock)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_products_search ON products(name COLLATE NOCASE, sku COLLATE NOCASE)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_categories_status_order ON categories(status, sort_order)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_brands_status ON brands(status)');
 }
 function migrateOrderStatusData() {
   db.prepare("UPDATE orders SET status = 'OUT_FOR_DELIVERY', updated_at = ? WHERE status = 'SHIPPED'").run(now());
@@ -685,6 +750,59 @@ function migrateOrderStatusData() {
       SELECT 1 FROM order_status_history h WHERE h.order_id = o.id
     )
   `);
+  
+  // Update CHECK constraint to include REJECTED status
+  try {
+    // Check if we can insert a row with REJECTED status
+    const testResult = db.prepare("INSERT INTO orders (order_number,customer_id,customer_name,customer_email,customer_phone,items_json,subtotal,delivery_charge,total,status,payment_method,payment_status,delivery_address_json,created_at,updated_at) VALUES ('TEST-REJECTED-CONSTRAINT',1,'Test','test@test.com','1234567890','[]',0,0,0,'REJECTED','Cash on Delivery','PENDING','{}',datetime('now'),datetime('now'))").run();
+    // If successful, delete the test row
+    db.prepare("DELETE FROM orders WHERE order_number = 'TEST-REJECTED-CONSTRAINT'").run();
+  } catch (error) {
+    // If constraint fails, we need to recreate the table
+    if (String(error.message).includes('CHECK constraint')) {
+      console.log('[Migration] Updating orders table CHECK constraint to include REJECTED status');
+      try {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS orders_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_number TEXT NOT NULL UNIQUE,
+            customer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+            customer_name TEXT NOT NULL,
+            customer_email TEXT NOT NULL DEFAULT '',
+            customer_phone TEXT NOT NULL,
+            gst_number TEXT,
+            items_json TEXT NOT NULL DEFAULT '[]',
+            subtotal REAL NOT NULL DEFAULT 0,
+            delivery_charge REAL NOT NULL DEFAULT 0,
+            total REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CONFIRMED', 'REJECTED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED')),
+            payment_method TEXT NOT NULL DEFAULT 'Cash on Delivery',
+            payment_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (payment_status IN ('PENDING', 'PAID', 'FAILED', 'REFUNDED')),
+            delivery_address_json TEXT NOT NULL,
+            notification_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (notification_status IN ('PENDING', 'PREPARED', 'SENT', 'FAILED')),
+            notification_sent_at TEXT,
+            notification_message_id TEXT,
+            stock_restored INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          )
+        `);
+        db.exec(`
+          INSERT INTO orders_new 
+          SELECT * FROM orders
+        `);
+        db.exec('DROP TABLE orders');
+        db.exec('ALTER TABLE orders_new RENAME TO orders');
+        db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_order_number ON orders(order_number) WHERE order_number IS NOT NULL');
+        db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idempotency_key ON orders(idempotency_key) WHERE idempotency_key IS NOT NULL');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_orders_customer_created ON orders(customer_id, created_at DESC)');
+        db.exec('CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders(status, created_at DESC)');
+        console.log('[Migration] Orders table CHECK constraint updated successfully');
+      } catch (migrationError) {
+        console.log('[Migration] Orders table constraint update failed:', migrationError.message);
+      }
+    }
+  }
 }
 function ensureCoreAdminAccount() {
   const adminEmail = String(process.env.ADMIN_EMAIL || 'owner@murugesan.in').trim().toLowerCase();
@@ -931,6 +1049,20 @@ app.patch('/api/admin/orders/:id/status', auth, admin, async (req, res) => {
     }
     const timestamp = now();
     const note = String(req.body?.note || '').trim().slice(0, 500);
+    
+    // Restore stock when cancelling or rejecting (only if not already restored)
+    if ((requestedStatus === 'CANCELLED' || requestedStatus === 'REJECTED') && Number(order.stock_restored) === 0) {
+      const items = safeJson(order.items_json, []);
+      for (const item of items) {
+        const quantity = Number(item.quantity || 0);
+        const productId = Number(item.productId || item.product_id || 0);
+        if (quantity > 0 && productId > 0) {
+          db.prepare('UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?').run(quantity, timestamp, productId);
+        }
+      }
+      db.prepare('UPDATE orders SET stock_restored = 1 WHERE id = ?').run(orderId);
+    }
+    
     db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(requestedStatus, timestamp, orderId);
     db.prepare('INSERT INTO order_status_history (order_id,status,changed_by,created_at,note) VALUES (?,?,?,?,?)').run(orderId, requestedStatus, req.user.id, timestamp, note);
     db.exec('COMMIT');
@@ -1138,10 +1270,10 @@ const handleCreateCustomerOrder = async (req, res) => {
       status: 'PENDING',
     });
     if (ownerNotification.notificationId) {
-      db.prepare('UPDATE orders SET notification_status = ? WHERE id = ?').run('PREPARED', orderId);
+      db.prepare('UPDATE orders SET notification_status = ? WHERE id = ?').run('NOT_ATTEMPTED', orderId);
     }
     const whatsappUrl = ownerNotification.whatsappUrl || buildWhatsAppUrl(ownerWhatsappNumber, ownerMsg);
-    res.status(201).json({ success: true, order: mapOrder(order), whatsappUrl });
+    res.status(201).json({ success: true, order: mapOrder(order), whatsappUrl, notificationId: ownerNotification.notificationId });
   } catch (error) {
     db.exec('ROLLBACK');
     if (String(error.message).includes('UNIQUE')) {
@@ -1158,13 +1290,121 @@ const handleCreateCustomerOrder = async (req, res) => {
 };
 app.post('/api/orders', auth, handleCreateCustomerOrder);
 app.post('/api/me/orders', auth, handleCreateCustomerOrder);
-app.get('/api/catalog', (_req, res) => { const categories = db.prepare("SELECT * FROM categories WHERE status = 'ACTIVE' ORDER BY sort_order, name").all().map(mapCategory); const products = db.prepare(`${productSelect} WHERE p.status = 'ACTIVE' ORDER BY p.created_at DESC`).all().map(mapProduct); res.json({ categories, products }); });
+
+// Update notification status (OPENED, FAILED)
+app.patch('/api/notifications/:id/status', auth, (req, res) => {
+  const notificationId = Number(req.params.id);
+  const { status } = req.body || {};
+  
+  if (!notificationId) return res.status(400).json({ error: 'Notification ID required' });
+  if (!status || !['NOT_ATTEMPTED', 'OPENED', 'FAILED'].includes(status)) {
+    return res.status(400).json({ error: 'Invalid status. Must be NOT_ATTEMPTED, OPENED, or FAILED' });
+  }
+  
+  const notification = db.prepare('SELECT * FROM order_notifications WHERE id = ?').get(notificationId);
+  if (!notification) return res.status(404).json({ error: 'Notification not found' });
+  
+  // Only allow customer to update their own notifications
+  if (notification.customer_id !== req.user.id && req.user.role !== 'ADMIN') {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  
+  db.prepare('UPDATE order_notifications SET status = ?, updated_at = ? WHERE id = ?').run(status, now(), notificationId);
+  
+  // Also update order notification_status if this is the primary notification
+  const orderNotification = db.prepare('SELECT * FROM order_notifications WHERE id = ? AND type = ?').get(notificationId, 'NEW_ORDER_OWNER');
+  if (orderNotification) {
+    db.prepare('UPDATE orders SET notification_status = ? WHERE id = ?').run(status, orderNotification.order_id);
+  }
+  
+  res.json({ success: true, status });
+});
+app.get('/api/catalog', (req, res) => { 
+  const categories = db.prepare("SELECT * FROM categories WHERE status = 'ACTIVE' ORDER BY sort_order, name").all().map(mapCategory);
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 24)));
+  const categoryId = req.query.categoryId ? Number(req.query.categoryId) : null;
+  
+  const filters = ["p.status = 'ACTIVE'"];
+  const params = [];
+  
+  if (categoryId) {
+    filters.push('p.category_id = ?');
+    params.push(categoryId);
+  }
+  
+  const where = ` WHERE ${filters.join(' AND ')}`;
+  const total = db.prepare(`SELECT COUNT(*) count FROM products p${where}`).get(...params).count;
+  const products = db.prepare(`${productSelect}${where} ORDER BY p.created_at DESC LIMIT ? OFFSET ?`).all(...params, limit, (page - 1) * limit).map(mapProduct);
+  
+  res.json({ categories, products, page, limit, total, pages: Math.ceil(total / limit) });
+});
+
+// Customer-facing search — used when catalog is large (>200 products) or for accurate results
+app.get('/api/search', (req, res) => {
+  const q = String(req.query.q || '').trim();
+  const categoryId = req.query.categoryId ? Number(req.query.categoryId) : null;
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 48)));
+
+  const filters = ["p.status = 'ACTIVE'"];
+  const params = [];
+
+  if (q) {
+    filters.push(`(
+      p.name LIKE ? COLLATE NOCASE
+      OR p.sku LIKE ? COLLATE NOCASE
+      OR b.name LIKE ? COLLATE NOCASE
+      OR c.name LIKE ? COLLATE NOCASE
+      OR p.description LIKE ? COLLATE NOCASE
+    )`);
+    const like = `%${q}%`;
+    params.push(like, like, like, like, like);
+  }
+
+  if (categoryId) {
+    filters.push('p.category_id = ?');
+    params.push(categoryId);
+  }
+
+  const where = ` WHERE ${filters.join(' AND ')}`;
+
+  const total = db.prepare(
+    `SELECT COUNT(*) count FROM products p
+     LEFT JOIN categories c ON c.id = p.category_id
+     LEFT JOIN brands b ON b.id = p.brand_id${where}`
+  ).get(...params).count;
+
+  const rows = db.prepare(
+    `${productSelect}${where} ORDER BY p.name ASC LIMIT ? OFFSET ?`
+  ).all(...params, limit, (page - 1) * limit).map(mapProduct);
+
+  res.json({ data: rows, total, page, limit, pages: Math.ceil(total / limit), query: q });
+});
+
+// Validate a list of product IDs and return current stock/price — used by checkout
+app.post('/api/products/validate', (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
+  if (!ids.length) return res.status(400).json({ error: 'ids required' });
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = db.prepare(
+    `${productSelect} WHERE p.id IN (${placeholders}) AND p.status = 'ACTIVE'`
+  ).all(...ids).map(mapProduct);
+  res.json(rows);
+});
 app.get('/api/categories', (_req, res) => {
+  const cacheKey = 'categories:all';
+  const cached = staticDataCache.get(cacheKey);
+  if (cached) {
+    return res.json(cached);
+  }
+  
   const rows = db.prepare('SELECT * FROM categories ORDER BY sort_order, name').all();
   const categories = rows.map((row) => {
     const attributes = db.prepare('SELECT * FROM attributes WHERE category_id = ? ORDER BY sort_order, name').all(row.id);
     return mapCategory(row, attributes);
   });
+  staticDataCache.set(cacheKey, categories);
   res.json(categories);
 });
 function upsertCategoryAttributes(categoryId, attributes) {
@@ -1179,7 +1419,7 @@ function upsertCategoryAttributes(categoryId, attributes) {
     .filter((attribute) => attribute.name);
 
   const allowedType = new Set(['Dropdown', 'Multi-select', 'Text', 'Number', 'Number Range', 'Boolean / Yes-No', 'Color', 'Image', 'Radio Button']);
-  const existing = db.prepare('SELECT id, name FROM attributes WHERE category_id = ?').all(categoryId);
+  const existing = db.prepare('SELECT id, name FROM attributes WHERE category_id = ? AND product_type_id IS NULL').all(categoryId);
   const existingByName = new Map(existing.map((row) => [String(row.name).trim().toLowerCase(), row]));
   const nextIds = new Set();
 
@@ -1189,10 +1429,10 @@ function upsertCategoryAttributes(categoryId, attributes) {
     const current = existingByName.get(key);
     const valuesJson = JSON.stringify(attribute.values);
     if (current) {
-      db.prepare('UPDATE attributes SET name = ?, type = ?, options_json = ?, updated_at = ? WHERE id = ? AND category_id = ?').run(attribute.name, normalizedType, valuesJson, now(), current.id, categoryId);
+      db.prepare('UPDATE attributes SET name = ?, type = ?, options_json = ?, updated_at = ? WHERE id = ? AND category_id = ? AND product_type_id IS NULL').run(attribute.name, normalizedType, valuesJson, now(), current.id, categoryId);
       nextIds.add(Number(current.id));
     } else {
-      const result = db.prepare('INSERT INTO attributes (category_id, name, type, required, filterable, searchable, options_json, status, sort_order, created_at, updated_at) VALUES (?, ?, ?, 0, 0, 0, ?, ?, 0, ?, ?)').run(categoryId, attribute.name, normalizedType, valuesJson, 'ACTIVE', now(), now());
+      const result = db.prepare('INSERT INTO attributes (category_id, product_type_id, name, type, required, filterable, searchable, options_json, status, sort_order, created_at, updated_at) VALUES (?, NULL, ?, ?, 0, 0, 0, ?, ?, 0, ?, ?)').run(categoryId, attribute.name, normalizedType, valuesJson, 'ACTIVE', now(), now());
       nextIds.add(Number(result.lastInsertRowid));
     }
   }
@@ -1342,6 +1582,15 @@ app.get('/api/brands', (_req, res) => {
   const search = String(_req.query.search || '').trim();
   const includeArchived = String(_req.query.includeArchived || 'false') === 'true';
   
+  // Only cache when no search and no archived filter
+  if (!search && !includeArchived) {
+    const cacheKey = 'brands:active';
+    const cached = staticDataCache.get(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+  }
+  
   let query = 'SELECT b.*, COUNT(DISTINCT p.id) as product_count FROM brands b LEFT JOIN products p ON p.brand_id = b.id AND p.status != ? GROUP BY b.id';
   const params = ['ARCHIVED'];
   
@@ -1362,6 +1611,11 @@ app.get('/api/brands', (_req, res) => {
     productCount: Number(row.product_count || 0)
   }));
   
+  // Cache only when no search and no archived filter
+  if (!search && !includeArchived) {
+    staticDataCache.set('brands:active', brands);
+  }
+  
   res.json(brands);
 });
 app.post('/api/brands', auth, admin, (req, res) => { const body = req.body || {}; const timestamp = now(); try { const result = db.prepare('INSERT INTO brands (name,slug,logo_url,description,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').run(String(body.name).trim(), slugify(body.slug || body.name), body.logoUrl || null, body.description || '', body.status || 'ACTIVE', timestamp, timestamp); res.status(201).json(mapBrand(db.prepare('SELECT * FROM brands WHERE id = ?').get(result.lastInsertRowid))); } catch (error) { res.status(400).json({ error: error.message.includes('UNIQUE') ? 'Brand slug already exists' : 'Unable to create brand' }); } });
@@ -1371,6 +1625,15 @@ app.patch('/api/brands/:id/restore', auth, admin, (req, res) => { const result =
 app.get('/api/product-types', (req, res) => { 
   const categoryId = Number(req.query.categoryId || 0); 
   const includeArchived = String(req.query.includeArchived || 'false') === 'true';
+  
+  // Only cache when no category filter and no archived filter
+  if (!categoryId && !includeArchived) {
+    const cacheKey = 'product-types:all';
+    const cached = staticDataCache.get(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
+  }
   
   let query = categoryId 
     ? 'SELECT pt.*, COUNT(DISTINCT p.id) as product_count FROM product_types pt LEFT JOIN products p ON p.product_type_id = pt.id AND p.status != ? WHERE pt.category_id = ?' 
@@ -1391,6 +1654,11 @@ app.get('/api/product-types', (req, res) => {
     ...mapProductType(row),
     productCount: Number(row.product_count || 0)
   }));
+  
+  // Cache only when no category filter and no archived filter
+  if (!categoryId && !includeArchived) {
+    staticDataCache.set('product-types:all', rows);
+  }
   
   res.json(rows); 
 });
@@ -1421,12 +1689,112 @@ app.post('/api/product-types', auth, admin, (req, res) => {
 });
 app.patch('/api/product-types/:id/archive', auth, admin, (req, res) => { const id = Number(req.params.id); const productCount = db.prepare("SELECT COUNT(*) count FROM products WHERE product_type_id = ? AND status != 'ARCHIVED'").get(id).count; if (productCount > 0) { const result = db.prepare("UPDATE product_types SET status = 'ARCHIVED', updated_at = ? WHERE id = ?").run(now(), id); if (!result.changes) return res.status(404).json({ error: 'Product type not found' }); return res.json({ archived: true, productCount, message: 'Product type archived and removed from active category workflows.' }); } const result = db.prepare('DELETE FROM product_types WHERE id = ?').run(id); if (!result.changes) return res.status(404).json({ error: 'Product type not found' }); res.json({ deleted: true, message: 'Product type deleted because it has no remaining products.' }); });
 app.patch('/api/product-types/:id/restore', auth, admin, (req, res) => { const result = db.prepare("UPDATE product_types SET status = 'ACTIVE', updated_at = ? WHERE id = ?").run(now(), Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Product type not found' }); res.json({ restored: true }); });
-app.get('/api/attributes', (req, res) => { const categoryId = Number(req.query.categoryId || 0); const query = categoryId ? 'SELECT * FROM attributes WHERE category_id = ? ORDER BY sort_order, name' : 'SELECT * FROM attributes ORDER BY category_id, sort_order, name'; const rows = categoryId ? db.prepare(query).all(categoryId) : db.prepare(query).all(); res.json(rows.map(mapAttribute)); });
-app.post('/api/attributes', auth, admin, (req, res) => { const body = req.body || {}; const timestamp = now(); try { const result = db.prepare('INSERT INTO attributes (category_id,name,type,required,filterable,searchable,options_json,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(Number(body.categoryId), String(body.name).trim(), String(body.type || 'Text'), Number(Boolean(body.required)), Number(Boolean(body.filterable)), Number(Boolean(body.searchable)), JSON.stringify(Array.isArray(body.options) ? body.options : []), body.status || 'ACTIVE', Number(body.sortOrder || 0), timestamp, timestamp); res.status(201).json(mapAttribute(db.prepare('SELECT * FROM attributes WHERE id = ?').get(result.lastInsertRowid))); } catch (error) { res.status(400).json({ error: error.message.includes('UNIQUE') ? 'An attribute with that name already exists in this category' : 'Unable to create attribute' }); } });
+app.get('/api/attributes', (req, res) => { 
+  const categoryId = Number(req.query.categoryId || 0);
+  const productTypeId = Number(req.query.productTypeId || 0);
+  let query = 'SELECT * FROM attributes WHERE 1=1';
+  const params = [];
+  
+  if (categoryId) {
+    query += ' AND category_id = ?';
+    params.push(categoryId);
+  }
+  
+  if (productTypeId) {
+    query += ' AND product_type_id = ?';
+    params.push(productTypeId);
+  }
+  
+  query += ' ORDER BY category_id, product_type_id, sort_order, name';
+  const rows = params.length ? db.prepare(query).all(...params) : db.prepare(query).all();
+  res.json(rows.map(mapAttribute)); 
+});
+app.post('/api/attributes', auth, admin, (req, res) => { 
+  const body = req.body || {}; 
+  const timestamp = now(); 
+  const categoryId = Number(body.categoryId);
+  const productTypeId = body.productTypeId ? Number(body.productTypeId) : null;
+  
+  if (!categoryId) {
+    return res.status(400).json({ error: 'Category ID is required' });
+  }
+  
+  if (productTypeId) {
+    const productType = db.prepare('SELECT id, category_id FROM product_types WHERE id = ?').get(productTypeId);
+    if (!productType) {
+      return res.status(400).json({ error: 'Product type not found' });
+    }
+    if (productType.category_id !== categoryId) {
+      return res.status(400).json({ error: 'Product type does not belong to the specified category' });
+    }
+  }
+  
+  try { 
+    const result = db.prepare('INSERT INTO attributes (category_id,product_type_id,name,type,required,filterable,searchable,options_json,status,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').run(
+      categoryId, 
+      productTypeId, 
+      String(body.name).trim(), 
+      String(body.type || 'Text'), 
+      Number(Boolean(body.required)), 
+      Number(Boolean(body.filterable)), 
+      Number(Boolean(body.searchable)), 
+      JSON.stringify(Array.isArray(body.options) ? body.options : []), 
+      body.status || 'ACTIVE', 
+      Number(body.sortOrder || 0), 
+      timestamp, 
+      timestamp
+    ); 
+    res.status(201).json(mapAttribute(db.prepare('SELECT * FROM attributes WHERE id = ?').get(result.lastInsertRowid))); 
+  } catch (error) { 
+    res.status(400).json({ error: error.message.includes('UNIQUE') ? 'An attribute with that name already exists in this context' : 'Unable to create attribute' }); 
+  } 
+});
+app.patch('/api/attributes/:id', auth, admin, (req, res) => {
+  const body = req.body || {};
+  const id = Number(req.params.id);
+  const timestamp = now();
+  const current = db.prepare('SELECT * FROM attributes WHERE id = ?').get(id);
+  if (!current) return res.status(404).json({ error: 'Attribute not found' });
+  
+  const categoryId = body.categoryId !== undefined ? Number(body.categoryId) : current.category_id;
+  const productTypeId = body.productTypeId !== undefined ? (body.productTypeId ? Number(body.productTypeId) : null) : current.product_type_id;
+  
+  if (productTypeId) {
+    const productType = db.prepare('SELECT id, category_id FROM product_types WHERE id = ?').get(productTypeId);
+    if (!productType) {
+      return res.status(400).json({ error: 'Product type not found' });
+    }
+    if (productType.category_id !== categoryId) {
+      return res.status(400).json({ error: 'Product type does not belong to the specified category' });
+    }
+  }
+  
+  try {
+    const result = db.prepare('UPDATE attributes SET category_id = ?, product_type_id = ?, name = ?, type = ?, required = ?, filterable = ?, searchable = ?, options_json = ?, status = ?, sort_order = ?, updated_at = ? WHERE id = ?').run(
+      categoryId,
+      productTypeId,
+      String(body.name || current.name).trim(),
+      String(body.type || current.type),
+      Number(body.required !== undefined ? body.required : current.required),
+      Number(body.filterable !== undefined ? body.filterable : current.filterable),
+      Number(body.searchable !== undefined ? body.searchable : current.searchable),
+      JSON.stringify(Array.isArray(body.options) ? body.options : safeJson(current.options_json, [])),
+      body.status !== undefined ? body.status : current.status,
+      Number(body.sortOrder !== undefined ? body.sortOrder : current.sort_order),
+      timestamp,
+      id
+    );
+    if (!result.changes) return res.status(404).json({ error: 'Attribute not found' });
+    res.json(mapAttribute(db.prepare('SELECT * FROM attributes WHERE id = ?').get(id)));
+  } catch (error) {
+    res.status(400).json({ error: error.message.includes('UNIQUE') ? 'An attribute with that name already exists in this context' : 'Unable to update attribute' });
+  }
+});
 app.patch('/api/attributes/:id/archive', auth, admin, (req, res) => { const id = Number(req.params.id); const productCount = db.prepare("SELECT COUNT(*) count FROM products WHERE attributes_json LIKE ? AND status != 'ARCHIVED'").get(`%"${id}"%`).count; if (productCount > 0) { const result = db.prepare("UPDATE attributes SET status = 'ARCHIVED', updated_at = ? WHERE id = ?").run(now(), id); if (!result.changes) return res.status(404).json({ error: 'Attribute not found' }); return res.json({ archived: true, productCount, message: 'Attribute archived and preserved on existing products.' }); } const result = db.prepare('DELETE FROM attributes WHERE id = ?').run(id); if (!result.changes) return res.status(404).json({ error: 'Attribute not found' }); res.json({ deleted: true, message: 'Attribute deleted because it is not used by any products.' }); });
 app.patch('/api/attributes/:id/restore', auth, admin, (req, res) => { const result = db.prepare("UPDATE attributes SET status = 'ACTIVE', updated_at = ? WHERE id = ?").run(now(), Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Attribute not found' }); res.json({ restored: true }); });
 app.post('/api/migration/legacy', auth, admin, (req, res) => { const categories = Array.isArray(req.body?.categories) ? req.body.categories : []; const products = Array.isArray(req.body?.products) ? req.body.products : []; const timestamp = now(); try { db.exec('BEGIN'); const categoryInsert = db.prepare('INSERT OR IGNORE INTO categories (name,slug,description,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?)'); for (const [index, category] of categories.entries()) categoryInsert.run(String(category.name || '').trim(), slugify(category.slug || category.name || `legacy-${index}`), category.description || '', Number(category.order || index + 1), timestamp, timestamp); const categoryId = db.prepare('SELECT id FROM categories WHERE name = ? COLLATE NOCASE'); const brandInsert = db.prepare('INSERT OR IGNORE INTO brands (name,slug,created_at,updated_at) VALUES (?,?,?,?)'); const brandId = db.prepare('SELECT id FROM brands WHERE name = ? COLLATE NOCASE'); const productInsert = db.prepare('INSERT OR IGNORE INTO products (sku,name,slug,category_id,brand_id,description,details,price,mrp,stock,unit,image_url,attributes_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'); for (const product of products) { const categoryRow = categoryId.get(String(product.category || 'Other Products')); if (!categoryRow) continue; const brandName = String(product.brand || '').trim(); if (brandName) brandInsert.run(brandName, slugify(brandName), timestamp, timestamp); const brandRow = brandName ? brandId.get(brandName) : null; const sku = String(product.code || product.sku || '').trim(); if (!sku) continue; productInsert.run(sku, String(product.name || sku), slugify(`${product.name || sku}-${sku}`), categoryRow.id, brandRow?.id || null, product.description || '', product.details || '', Number(product.price || 0), Number(product.mrp || product.price || 0), Number(product.stock || 0), product.unit || 'Nos', product.image || null, JSON.stringify(product.attributes || {}), timestamp, timestamp); } db.exec('COMMIT'); res.json({ migrated: { categories: categories.length, products: products.length } }); } catch (error) { db.exec('ROLLBACK'); res.status(400).json({ error: 'Migration failed', detail: error.message }); } });
 app.get('/api/products', (req, res) => { 
+  // Note: Products and stock are NEVER cached to ensure real-time inventory accuracy
   const page = Math.max(1, Number(req.query.page || 1)); 
   const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50))); 
   const search = String(req.query.search || '').trim(); 
@@ -1478,11 +1846,264 @@ app.get('/api/products', (req, res) => {
   const rows = db.prepare(`${productSelect}${where} ORDER BY ${orderBy} ${sortOrder} LIMIT ? OFFSET ?`).all(...params, limit, (page - 1) * limit).map(mapProduct); 
   res.json({ data: rows, page, limit, total, pages: Math.ceil(total / limit) }); 
 });
+// Background job for bulk import - creates job and returns immediately
+app.post('/api/products/bulk-import-job', auth, admin, (req, res) => {
+  const rows = Array.isArray(req.body?.products) ? req.body.products : [];
+  const duplicateMode = req.body?.duplicateMode === 'update' ? 'update' : 'skip';
+  if (!rows.length) return res.status(400).json({ error: 'At least one product is required' });
+  
+  const timestamp = now();
+  const result = db.prepare(
+    'INSERT INTO import_jobs (status, total_rows, processed_rows, valid_rows, error_rows, errors_json, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run('PENDING', rows.length, 0, 0, 0, '[]', req.user.id, timestamp, timestamp);
+  
+  const jobId = result.lastInsertRowid;
+  
+  // Process in background (non-blocking)
+  processBulkImportJob(jobId, rows, duplicateMode, req.user.id).catch(error => {
+    console.error('[Bulk Import Job] Error:', error);
+  });
+  
+  res.status(202).json({ jobId, status: 'PENDING', message: 'Import job started' });
+});
+
+// Get job status and progress
+app.get('/api/products/bulk-import-job/:id', auth, admin, (req, res) => {
+  const jobId = Number(req.params.id);
+  const job = db.prepare('SELECT * FROM import_jobs WHERE id = ?').get(jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  
+  const errors = job.errors_json ? JSON.parse(job.errors_json) : [];
+  
+  res.json({
+    id: job.id,
+    status: job.status,
+    totalRows: job.total_rows,
+    processedRows: job.processed_rows,
+    validRows: job.valid_rows,
+    errorRows: job.error_rows,
+    errors: errors.slice(0, 50), // Return first 50 errors
+    hasMoreErrors: errors.length > 50,
+    createdAt: job.created_at,
+    updatedAt: job.updated_at
+  });
+});
+
+// List import jobs
+app.get('/api/products/bulk-import-jobs', auth, admin, (req, res) => {
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit || 20)));
+  const jobs = db.prepare('SELECT * FROM import_jobs ORDER BY created_at DESC LIMIT ?').all(limit).map(job => ({
+    id: job.id,
+    status: job.status,
+    totalRows: job.total_rows,
+    processedRows: job.processed_rows,
+    validRows: job.valid_rows,
+    errorRows: job.error_rows,
+    createdAt: job.created_at,
+    updatedAt: job.updated_at
+  }));
+  res.json(jobs);
+});
+
+// Background job processor function
+async function processBulkImportJob(jobId, rows, duplicateMode, userId) {
+  const timestamp = now();
+  
+  try {
+    // Update job status to PROCESSING
+    db.prepare('UPDATE import_jobs SET status = ?, updated_at = ? WHERE id = ?').run('PROCESSING', timestamp, jobId);
+    
+    // ── STAGE 1: load reference data ────────────────────────────────────────────
+    const existingCategories = db.prepare("SELECT id, name, status FROM categories WHERE status != 'ARCHIVED'").all();
+    const existingBrands     = db.prepare("SELECT id, name, status FROM brands WHERE status != 'ARCHIVED'").all();
+    const existingTypes      = db.prepare("SELECT id, name, category_id, status FROM product_types WHERE status != 'ARCHIVED'").all();
+
+    const normalizeName = (value) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    
+    const categoryMap = new Map();
+    for (const c of existingCategories) categoryMap.set(normalizeName(c.name), { id: c.id, name: c.name });
+
+    const brandMap = new Map();
+    for (const b of existingBrands) brandMap.set(normalizeName(b.name), { id: b.id, name: b.name });
+
+    const typeKey = (catId, typeName) => `${catId}::${normalizeName(typeName)}`;
+    const typeMap = new Map();
+    for (const t of existingTypes) typeMap.set(typeKey(t.category_id, t.name), { id: t.id, name: t.name });
+
+    const existingSkus = new Set(
+      db.prepare('SELECT LOWER(sku) sku FROM products').all().map(r => r.sku)
+    );
+
+    // ── STAGE 2: validate every row ─────────────────────────────────────────────
+    const results = [];
+    const valid   = [];
+    const seenSkus = new Set();
+    const errors = [];
+
+    for (const entry of rows) {
+      const rowNum  = Number(entry?.row || 0);
+      const raw     = entry?.product && typeof entry.product === 'object' ? entry.product : entry;
+      const rowErrors = [];
+
+      const sku      = String(raw?.sku || raw?.code || '').trim();
+      const name     = String(raw?.name || '').trim();
+      const catName  = String(raw?.category || '').trim();
+      const brandName = String(raw?.brand || '').trim();
+      const typeName  = String(raw?.productType || '').trim();
+      const priceRaw  = String(raw?.price ?? '').trim();
+      const mrpRaw    = String(raw?.mrp ?? priceRaw).trim();
+      const stockRaw  = String(raw?.stock ?? '').trim();
+      const discountRaw = String(raw?.discount ?? '0').trim();
+      const status   = String(raw?.status || 'ACTIVE').toUpperCase();
+      const unit     = String(raw?.unit || 'Nos').trim();
+
+      const price    = Number(priceRaw);
+      const mrp      = Number(mrpRaw) || price;
+      const stock    = Number(stockRaw);
+      const discount = Number(discountRaw);
+
+      // Validation
+      if (!sku) rowErrors.push('SKU is required');
+      else if (!/^[A-Z0-9_-]+$/i.test(sku)) rowErrors.push('SKU must use only letters, numbers, dashes or underscores');
+      else if (seenSkus.has(sku.toLowerCase())) rowErrors.push('Duplicate SKU in this file');
+
+      if (!name) rowErrors.push('Product name is required');
+      if (!catName) rowErrors.push('Category is required');
+
+      if (!priceRaw || !Number.isFinite(price) || price < 0)
+        rowErrors.push('Price must be a valid number ≥ 0');
+      if (!stockRaw || !Number.isInteger(stock) || stock < 0)
+        rowErrors.push('Stock must be a whole number ≥ 0');
+      if (!Number.isFinite(discount) || discount < 0 || discount > 100)
+        rowErrors.push('Discount must be 0–100');
+      if (mrp > 0 && mrp < price)
+        rowErrors.push('MRP cannot be less than price');
+      if (!['ACTIVE', 'INACTIVE'].includes(status))
+        rowErrors.push('Status must be ACTIVE or INACTIVE');
+
+      const categoryInfo = catName ? categoryMap.get(normalizeName(catName)) : null;
+      if (catName && !categoryInfo)
+        rowErrors.push(`Category "${catName}" not found`);
+
+      const brandInfo = brandName ? brandMap.get(normalizeName(brandName)) : null;
+
+      let typeInfo = null;
+      if (typeName && categoryInfo) {
+        typeInfo = typeMap.get(typeKey(categoryInfo.id, typeName)) || null;
+      }
+
+      if (sku) seenSkus.add(sku.toLowerCase());
+
+      if (rowErrors.length) {
+        errors.push({ row: rowNum, sku, reason: rowErrors.join('; ') });
+        continue;
+      }
+
+      valid.push({
+        row: rowNum, sku, name, catName, brandName, typeName, unit,
+        price, mrp, stock, discount, status,
+        categoryInfo, brandInfo, typeInfo,
+        imageUrl: raw?.imageUrl || raw?.image || null,
+        description: raw?.description || '',
+        details: raw?.details || ''
+      });
+    }
+
+    // Update progress after validation
+    db.prepare('UPDATE import_jobs SET processed_rows = ?, valid_rows = ?, error_rows = ?, errors_json = ?, updated_at = ? WHERE id = ?')
+      .run(rows.length, valid.length, errors.length, JSON.stringify(errors), now(), jobId);
+
+    // ── STAGE 3: insert/update products ───────────────────────────────────────────
+    db.exec('BEGIN IMMEDIATE');
+    
+    let imported = 0;
+    let updated = 0;
+    let skipped = 0;
+
+    for (const item of valid) {
+      const isExisting = existingSkus.has(item.sku.toLowerCase());
+      
+      if (isExisting && duplicateMode === 'skip') {
+        skipped++;
+        continue;
+      }
+
+      const slug = slugify(`${item.name}-${item.sku}`);
+      
+      // Auto-create brand if needed
+      let brandId = item.brandInfo?.id;
+      if (item.brandName && !brandId) {
+        const brandSlug = slugify(item.brandName);
+        try {
+          const brandResult = db.prepare(
+            'INSERT INTO brands (name, slug, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)'
+          ).run(item.brandName, brandSlug, 'ACTIVE', timestamp, timestamp);
+          brandId = brandResult.lastInsertRowid;
+          brandMap.set(normalizeName(item.brandName), { id: brandId, name: item.brandName });
+        } catch (e) {
+          // Brand might already exist, fetch it
+          const existingBrand = db.prepare('SELECT id FROM brands WHERE slug = ?').get(brandSlug);
+          if (existingBrand) brandId = existingBrand.id;
+        }
+      }
+
+      // Auto-create product type if needed
+      let typeId = item.typeInfo?.id;
+      if (item.typeName && item.categoryInfo && !typeId) {
+        try {
+          const typeResult = db.prepare(
+            'INSERT INTO product_types (category_id, name, status, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)'
+          ).run(item.categoryInfo.id, item.typeName, 'ACTIVE', 0, timestamp, timestamp);
+          typeId = typeResult.lastInsertRowid;
+        } catch (e) {
+          const existingType = db.prepare('SELECT id FROM product_types WHERE category_id = ? AND name = ?').get(item.categoryInfo.id, item.typeName);
+          if (existingType) typeId = existingType.id;
+        }
+      }
+
+      if (isExisting && duplicateMode === 'update') {
+        db.prepare(
+          `UPDATE products SET name = ?, slug = ?, category_id = ?, brand_id = ?, product_type_id = ?, 
+           description = ?, details = ?, price = ?, mrp = ?, discount = ?, stock = ?, unit = ?, 
+           status = ?, updated_at = ? WHERE sku = ?`
+        ).run(item.name, slug, item.categoryInfo.id, brandId, typeId, item.description, item.details,
+          item.price, item.mrp, item.discount, item.stock, item.unit, item.status, timestamp, item.sku);
+        updated++;
+      } else {
+        db.prepare(
+          `INSERT INTO products (sku, name, slug, category_id, brand_id, product_type_id, description, details, 
+           price, mrp, discount, stock, unit, status, created_at, updated_at) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(item.sku, item.name, slug, item.categoryInfo.id, brandId, typeId, item.description, item.details,
+          item.price, item.mrp, item.discount, item.stock, item.unit, item.status, timestamp, timestamp);
+        imported++;
+      }
+    }
+
+    db.exec('COMMIT');
+    
+    // Clear cache after successful import
+    staticDataCache.clear();
+    
+    // Mark job as completed
+    db.prepare('UPDATE import_jobs SET status = ?, updated_at = ? WHERE id = ?').run('COMPLETED', now(), jobId);
+    
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* already closed */ }
+    console.error('[Bulk Import Job] Error:', error?.stack || error);
+    
+    // Mark job as failed
+    db.prepare('UPDATE import_jobs SET status = ?, errors_json = ?, updated_at = ? WHERE id = ?')
+      .run('FAILED', JSON.stringify([{ reason: error.message || 'Unknown error' }]), now(), jobId);
+  }
+}
+
+// Keep the synchronous endpoint for small imports (< 100 products)
 app.post('/api/products/bulk-import', auth, admin, (req, res) => {
   const rows = Array.isArray(req.body?.products) ? req.body.products : [];
   const duplicateMode = req.body?.duplicateMode === 'update' ? 'update' : 'skip';
   if (!rows.length) return res.status(400).json({ error: 'At least one product is required' });
-  if (rows.length > 2000) return res.status(400).json({ error: 'Maximum 2000 products per import. Please split into smaller files.' });
+  if (rows.length > 100) return res.status(400).json({ error: 'Maximum 100 products for synchronous import. Use /api/products/bulk-import-job for larger imports.' });
 
   const normalizeName = (value) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
   const timestamp = now();
@@ -1520,7 +2141,7 @@ app.post('/api/products/bulk-import', auth, admin, (req, res) => {
     const name     = String(raw?.name || '').trim();
     const catName  = String(raw?.category || '').trim();
     const brandName = String(raw?.brand || '').trim();
-    const typeName  = String(raw?.productType || raw?.details || '').trim();
+    const typeName  = String(raw?.productType || '').trim();
     const priceRaw  = String(raw?.price ?? '').trim();
     const mrpRaw    = String(raw?.mrp ?? priceRaw).trim();
     const stockRaw  = String(raw?.stock ?? '').trim();
@@ -1775,8 +2396,26 @@ app.post('/api/products', auth, admin, (req, res) => {
     const imageUrl = body.imageUrl && String(body.imageUrl).trim() ? body.imageUrl : null;
     const imageUrls = Array.isArray(body.imageUrls) ? body.imageUrls.filter(url => url && String(url).trim()) : [];
     
-    // Validate attributes against category schema
+    // Validate attributes against product type and category schema
     const attributes = body.attributes && typeof body.attributes === 'object' ? body.attributes : {};
+    
+    // Load applicable attributes (category-level + product-type-specific)
+    const applicableAttributes = db.prepare(`
+      SELECT * FROM attributes 
+      WHERE (category_id = ? AND product_type_id IS NULL)
+         OR (category_id = ? AND product_type_id = ?)
+      ORDER BY sort_order, name
+    `).all(categoryId, categoryId, productTypeId);
+    
+    // Validate required attributes
+    for (const attr of applicableAttributes) {
+      if (attr.required === 1) {
+        const value = attributes[attr.name];
+        if (value === undefined || value === null || String(value).trim() === '') {
+          return res.status(400).json({ error: `Attribute "${attr.name}" is required` });
+        }
+      }
+    }
     
     const result = db.prepare('INSERT INTO products (sku,name,slug,category_id,brand_id,product_type_id,description,details,price,mrp,discount,stock,unit,image_url,image_urls_json,attributes_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
       sku, 
@@ -1909,6 +2548,27 @@ app.patch('/api/products/:id', auth, admin, (req, res) => {
       }
     }
     
+    // Validate attributes against product type and category schema
+    const attributes = body.attributes !== undefined ? (typeof body.attributes === 'object' ? body.attributes : {}) : safeJson(current.attributes_json, {});
+    
+    // Load applicable attributes (category-level + product-type-specific)
+    const applicableAttributes = db.prepare(`
+      SELECT * FROM attributes 
+      WHERE (category_id = ? AND product_type_id IS NULL)
+         OR (category_id = ? AND product_type_id = ?)
+      ORDER BY sort_order, name
+    `).all(values.categoryId, values.categoryId, productTypeId);
+    
+    // Validate required attributes
+    for (const attr of applicableAttributes) {
+      if (attr.required === 1) {
+        const value = attributes[attr.name];
+        if (value === undefined || value === null || String(value).trim() === '') {
+          return res.status(400).json({ error: `Attribute "${attr.name}" is required` });
+        }
+      }
+    }
+    
     db.prepare('UPDATE products SET name = ?, category_id = ?, brand_id = ?, product_type_id = ?, description = ?, details = ?, price = ?, mrp = ?, discount = ?, stock = ?, unit = ?, image_url = ?, image_urls_json = ?, attributes_json = ?, status = ?, updated_at = ? WHERE id = ?').run(
       values.name, 
       values.categoryId, 
@@ -1976,7 +2636,44 @@ app.post('/api/images', auth, admin, upload.single('image'), (req, res) => {
     res.status(500).json({ error: 'Unable to save image' });
   }
 });
-app.get('/api/admin/stats', auth, admin, (_req, res) => { const count = (sql) => db.prepare(sql).get().count; res.json({ products: count("SELECT COUNT(*) count FROM products WHERE status != 'ARCHIVED'"), categories: count("SELECT COUNT(*) count FROM categories WHERE status != 'ARCHIVED'"), brands: count("SELECT COUNT(*) count FROM brands WHERE status != 'ARCHIVED'"), customers: count("SELECT COUNT(*) count FROM users WHERE role = 'CUSTOMER'"), orders: count('SELECT COUNT(*) count FROM orders'), revenue: Number(db.prepare('SELECT COALESCE(SUM(total), 0) total FROM orders').get().total || 0) }); });
+app.get('/api/admin/stats', auth, admin, (_req, res) => { 
+  const count = (sql) => db.prepare(sql).get().count;
+  const today = new Date().toISOString().split('T')[0];
+  
+  // Revenue calculation excluding cancelled/rejected orders
+  const totalRevenue = Number(db.prepare('SELECT COALESCE(SUM(total), 0) total FROM orders WHERE status NOT IN (\'CANCELLED\', \'REJECTED\')').get().total || 0);
+  const todayRevenue = Number(db.prepare('SELECT COALESCE(SUM(total), 0) total FROM orders WHERE DATE(created_at) = ? AND status NOT IN (\'CANCELLED\', \'REJECTED\')').get(today).total || 0);
+  
+  // Order counts by status
+  const pendingOrders = count("SELECT COUNT(*) count FROM orders WHERE status = 'PENDING'");
+  const confirmedOrders = count("SELECT COUNT(*) count FROM orders WHERE status = 'CONFIRMED'");
+  const processingOrders = count("SELECT COUNT(*) count FROM orders WHERE status = 'PROCESSING'");
+  const deliveredOrders = count("SELECT COUNT(*) count FROM orders WHERE status = 'DELIVERED'");
+  const cancelledOrders = count("SELECT COUNT(*) count FROM orders WHERE status = 'CANCELLED'");
+  const todayOrders = count("SELECT COUNT(*) count FROM orders WHERE DATE(created_at) = ?");
+  
+  // Stock counts
+  const lowStock = count("SELECT COUNT(*) count FROM products WHERE stock > 0 AND stock < 10 AND status != 'ARCHIVED'");
+  const outOfStock = count("SELECT COUNT(*) count FROM products WHERE stock = 0 AND status != 'ARCHIVED'");
+  
+  res.json({ 
+    products: count("SELECT COUNT(*) count FROM products WHERE status != 'ARCHIVED'"), 
+    categories: count("SELECT COUNT(*) count FROM categories WHERE status != 'ARCHIVED'"), 
+    brands: count("SELECT COUNT(*) count FROM brands WHERE status != 'ARCHIVED'"), 
+    customers: count("SELECT COUNT(*) count FROM users WHERE role = 'CUSTOMER'"), 
+    orders: count('SELECT COUNT(*) count FROM orders'),
+    revenue: totalRevenue,
+    todayRevenue,
+    todayOrders,
+    pendingOrders,
+    confirmedOrders,
+    processingOrders,
+    deliveredOrders,
+    cancelledOrders,
+    lowStock,
+    outOfStock
+  }); 
+});
 app.get('/api/admin/products', auth, admin, (req, res) => { 
   const page = Math.max(1, Number(req.query.page || 1)); 
   const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));

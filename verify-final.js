@@ -21,7 +21,7 @@ function uniqueSuffix() {
 
 (async () => {
   const suffix = uniqueSuffix();
-  const admin = { email: 'owner@murugesan.in', password: 'change-this-before-production' };
+  const admin = { mobile: 'owner@murugesan.in', password: process.env.ADMIN_PASSWORD || 'Bu@240708' };
   const customerPhone = '777' + String(Date.now()).slice(-7);
   const customer = { name: 'Final Verify Customer', mobile: customerPhone, password: 'Password123' };
   const adminLogin = await api('/api/auth/login', { method: 'POST', body: JSON.stringify(admin) });
