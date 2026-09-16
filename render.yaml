@@ -42,7 +42,7 @@ services:
       - key: ALLOWED_ORIGINS
         value: https://murugesan-electrical-and-hardwares.onrender.com
       - key: STORAGE_PROVIDER
-        sync: false
+        value: s3
       - key: S3_BUCKET
         sync: false
       - key: S3_REGION
