@@ -81,6 +81,12 @@ async function stopServer() {
     assert(category.status === 201, `category failed: ${JSON.stringify(category.body)}`);
     const product = await request('/api/products', { method: 'POST', headers: { Authorization: `Bearer ${adminToken}` }, body: JSON.stringify({ sku: 'INTEGRATION-1', name: 'Integration Product', categoryId: category.body.id, price: 1, mrp: 1, stock: 2 }) });
     assert(product.status === 201, `product failed: ${JSON.stringify(product.body)}`);
+    for (const query of ['Integration Product', 'integration', '  INTEGRATION  ', "' OR 1=1 --"]) {
+      const search = await request(`/api/search?q=${encodeURIComponent(query)}&page=1&limit=20`);
+      assert(search.status === 200 && Array.isArray(search.body.data), `search failed for ${query}`);
+    }
+    const exactSearch = await request('/api/search?q=integration%20product&page=1&limit=20');
+    assert(exactSearch.body.data.some((item) => item.id === product.body.id), 'exact search did not find the created product');
 
     const customerAToken = await register('Integration A', '9361866701');
     const customerBToken = await register('Integration B', '9361866702');
@@ -89,6 +95,8 @@ async function stopServer() {
 
     const first = await placeOrder(customerAToken, addressA, product.body.id, 'integration-key-a');
     assert(first.status === 201, `first order failed: ${JSON.stringify(first.body)}`);
+    assert(String(first.body.whatsappUrl || '').startsWith('https://wa.me/'), 'WhatsApp URL was not prepared');
+    assert(decodeURIComponent(first.body.whatsappUrl).includes('Integration A'), 'WhatsApp message omitted the customer name');
     const replay = await placeOrder(customerAToken, addressA, product.body.id, 'integration-key-a');
     assert(replay.status === 200 && replay.body.order.id === first.body.order.id, 'idempotency replay created a different order');
     const second = await placeOrder(customerAToken, addressA, product.body.id, 'integration-key-b');

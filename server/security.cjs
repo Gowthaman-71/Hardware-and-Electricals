@@ -50,7 +50,10 @@ function rateLimit(options = {}) {
         }
         return next();
       } catch (error) {
-        console.error('[Security] Redis rate limiter unavailable; using memory fallback:', error.message);
+        console.error('[Security] Redis rate limiter unavailable:', error.message);
+        if (process.env.NODE_ENV === 'production' || process.env.RENDER === 'true') {
+          return next(new Error('Redis rate limiter is unavailable in production.'));
+        }
       }
     }
     

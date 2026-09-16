@@ -1384,14 +1384,14 @@ app.get('/api/search', (req, res) => {
   const params = [];
 
   if (q) {
-    filters.push(`(
-      p.name LIKE ? COLLATE NOCASE
-      OR p.sku LIKE ? COLLATE NOCASE
-      OR b.name LIKE ? COLLATE NOCASE
-      OR c.name LIKE ? COLLATE NOCASE
-      OR p.description LIKE ? COLLATE NOCASE
-    )`);
     const like = `%${q}%`;
+    filters.push(`(
+      LOWER(p.name) LIKE LOWER(?)
+      OR LOWER(p.sku) LIKE LOWER(?)
+      OR LOWER(b.name) LIKE LOWER(?)
+      OR LOWER(c.name) LIKE LOWER(?)
+      OR LOWER(p.description) LIKE LOWER(?)
+    )`);
     params.push(like, like, like, like, like);
   }
 

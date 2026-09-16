@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 
-const ROOT = 'd:/E commerce';
+const ROOT = process.cwd();
 const TEST_PORT = 8898;
 const BASE = `http://127.0.0.1:${TEST_PORT}`;
 const TEST_ADMIN_EMAIL = 'acceptance-owner@test.local';
@@ -739,5 +739,6 @@ async function cleanupAcceptanceData() {
     await stopServer();
     await cleanupAcceptanceData();
     db.close();
+    try { unlinkSync(DB_PATH); } catch { /* disposable test database */ }
   }
 })();
