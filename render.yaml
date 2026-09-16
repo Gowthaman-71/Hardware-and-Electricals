@@ -3,7 +3,7 @@ services:
     name: hardware-and-electricals
     runtime: node
     buildCommand: npm install --include=dev && npm run build
-    startCommand: npm run start:api
+    startCommand: node server/index.cjs
     envVars:
       - key: NODE_VERSION
         value: 24.14.1
