@@ -1083,6 +1083,11 @@ function App() {
     return () => window.clearTimeout(t);
   }, [query]);
   const [cart, setCart] = useState<{ product: Product; quantity: number }[]>([]);
+  const [toast, setToast] = useState("");
+  const notify = (message: string) => {
+    setToast(message);
+    window.setTimeout(() => setToast(""), 2500);
+  };
   
   // Restore cart from localStorage once products are loaded — clamp quantities to current stock
   useEffect(() => {
@@ -1120,12 +1125,11 @@ function App() {
     } catch {
       localStorage.removeItem("murugesan-cart");
     }
-  }, [products]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [products]);
   const [editing, setEditing] = useState<Product | null>(null);
   const [authToken, setAuthToken] = useState(() => readStoredToken("murugesan-auth-token"));
   const [customerToken, setCustomerToken] = useState(() => readStoredToken("murugesan-customer-token"));
   const [customer, setCustomer] = useState<Customer | null>(null);
-  const [toast, setToast] = useState("");
   const setScreen = (next: Screen) => {
     setScreenState(next);
     window.history.pushState({ screen: next }, "", window.location.pathname);
@@ -1170,7 +1174,8 @@ function App() {
         setCatalogTotal(catalog.total);
         setCatalogPages(catalog.pages);
         setCatalogError("");
-      } catch {
+      } catch (error) {
+        console.error('[App] Catalog load failed:', error);
         if (mounted) {
           setCatalogError("Unable to load the catalog. Please check your connection.");
         }
@@ -1209,11 +1214,6 @@ function App() {
       active = false;
     };
   }, []);
-  const notify = (message: string) => {
-    setToast(message);
-    window.setTimeout(() => setToast(""), 2500);
-  };
-  
   // Backend search with loading and error states
   const [searchResults, setSearchResults] = useState<Product[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -1372,6 +1372,17 @@ function App() {
     }
     setIntro(false);
   };
+
+  // Add timeout to prevent infinite splash screen
+  useEffect(() => {
+    if (!intro) return;
+    const timeout = setTimeout(() => {
+      console.warn('[App] Splash screen timeout - forcing skip');
+      skipIntro();
+    }, 5000); // 5 second timeout
+    return () => clearTimeout(timeout);
+  }, [intro]);
+
   if (intro) return <BrandIntro onSkip={skipIntro} />;
   return (
     <div className={screen === "admin" ? "app admin-mode" : "app"}>
@@ -2333,7 +2344,7 @@ function Cart({
           ));
         }
       }
-    } catch (err) {
+    } catch {
       setError("Failed to update cart. Please try again.");
     } finally {
       setUpdating(false);
@@ -4998,7 +5009,7 @@ function CustomerCheckout({
       const productMap = new Map(validatedProducts.map((p: Product) => [p.id, p]));
       
       let hasChanges = false;
-      let outOfStockItems: string[] = [];
+      const outOfStockItems: string[] = [];
       
       for (const item of items) {
         const currentProduct = productMap.get(item.product.id);
@@ -5031,7 +5042,7 @@ function CustomerCheckout({
       }
       
       return true;
-    } catch (error) {
+    } catch {
       setValidationError("Unable to validate inventory. Please check your connection and try again.");
       return false;
     } finally {

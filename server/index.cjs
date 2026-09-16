@@ -618,6 +618,10 @@ const mapProduct = (row) => row ? {
   productType: String(row.product_type_name || ''),
   productTypeId: row.product_type_id == null ? null : Number(row.product_type_id),
   unit: String(row.unit || 'Nos'),
+  price: Number(row.price || 0),
+  mrp: Number(row.mrp || row.price || 0),
+  discount: Number(row.discount || 0),
+  stock: Number(row.stock || 0),
   description: row.description || '',
   details: row.details || '',
   image: getImageUrl(row.image_url) || '',
@@ -2736,6 +2740,3 @@ app.use((req, res, next) => { if (req.method !== 'GET' || req.path.startsWith('/
 app.use(security.errorHandler);
 
 app.listen(port, () => console.log(`Catalog API listening on http://localhost:${port}`));
-
-// Security: Global error handler (must be last)
-app.use(security.errorHandler);
