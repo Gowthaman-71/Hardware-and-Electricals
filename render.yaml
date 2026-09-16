@@ -59,5 +59,3 @@ services:
         value: redis
       - key: REDIS_URL
         sync: false
-      - key: UPLOAD_DIR
-        value: /tmp/uploads

@@ -2673,6 +2673,12 @@ function BulkProductImport({
     );
   };
   const validate = async (file: File) => {
+    if (file.size > 10 * 1024 * 1024) {
+      setErrors([{ row: 0, sku: "", field: "File", message: "Import file must be 10MB or smaller" }]);
+      setItems([]);
+      setTotalRows(0);
+      return;
+    }
     setFileName(file.name);
     const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
     const rows = XLSX.utils.sheet_to_json<string[]>(
