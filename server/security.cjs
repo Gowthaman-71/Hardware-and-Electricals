@@ -128,19 +128,20 @@ function securityHeaders(req, res, next) {
   res.removeHeader('X-Powered-By');
   
   // Content Security Policy (adjusted for e-commerce)
-  const csp = [
-    "default-src 'self'",
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:", // React needs eval, add blob for modules
-    "style-src 'self' 'unsafe-inline'", // Inline styles for React
-    "img-src 'self' data: https: blob:", // Allow data URIs and external images
-    "font-src 'self' data: blob:",
-    "connect-src 'self' https://api.whatsapp.com https://*.onrender.com", // WhatsApp API + Render
-    "frame-ancestors 'none'",
-    "base-uri 'self'",
-    "form-action 'self'",
-    "worker-src 'self' blob:"
-  ].join('; ');
-  res.set('Content-Security-Policy', csp);
+  // Temporarily disabled for debugging blank page issue
+  // const csp = [
+  //   "default-src 'self'",
+  //   "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:", // React needs eval, add blob for modules
+  //   "style-src 'self' 'unsafe-inline'", // Inline styles for React
+  //   "img-src 'self' data: https: blob:", // Allow data URIs and external images
+  //   "font-src 'self' data: blob:",
+  //   "connect-src 'self' https://api.whatsapp.com https://*.onrender.com", // WhatsApp API + Render
+  //   "frame-ancestors 'none'",
+  //   "base-uri 'self'",
+  //   "form-action 'self'",
+  //   "worker-src 'self' blob:"
+  // ].join('; ');
+  // res.set('Content-Security-Policy', csp);
   
   // HTTPS enforcement (only in production with HTTPS)
   if (process.env.NODE_ENV === 'production') {
