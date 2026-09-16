@@ -5076,11 +5076,10 @@ function CustomerCheckout({
       setMessage("Please enter a valid GST number.");
       return;
     }
-    const checkoutFingerprint = `${customer?.id || "customer"}:${selected}:${normalizedGst}:${items
-      .map(({ product, quantity }) => `${product.id}-${quantity}`)
-      .join(",")}`;
-    if (idempotencyKey.current !== checkoutFingerprint) {
-      idempotencyKey.current = checkoutFingerprint;
+    if (!idempotencyKey.current) {
+      idempotencyKey.current = typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     }
     setSubmitting(true);
     setMessage("");

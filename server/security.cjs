@@ -127,21 +127,19 @@ function securityHeaders(req, res, next) {
   // Remove powered-by header
   res.removeHeader('X-Powered-By');
   
-  // Content Security Policy (adjusted for e-commerce)
-  // Temporarily disabled for debugging blank page issue
-  // const csp = [
-  //   "default-src 'self'",
-  //   "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:", // React needs eval, add blob for modules
-  //   "style-src 'self' 'unsafe-inline'", // Inline styles for React
-  //   "img-src 'self' data: https: blob:", // Allow data URIs and external images
-  //   "font-src 'self' data: blob:",
-  //   "connect-src 'self' https://api.whatsapp.com https://*.onrender.com", // WhatsApp API + Render
-  //   "frame-ancestors 'none'",
-  //   "base-uri 'self'",
-  //   "form-action 'self'",
-  //   "worker-src 'self' blob:"
-  // ].join('; ');
-  // res.set('Content-Security-Policy', csp);
+  const csp = [
+    "default-src 'self'",
+    "script-src 'self' blob:",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: https: blob:",
+    "font-src 'self' data: blob:",
+    "connect-src 'self' https://*.onrender.com",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "worker-src 'self' blob:"
+  ].join('; ');
+  res.set('Content-Security-Policy', csp);
   
   // HTTPS enforcement (only in production with HTTPS)
   if (process.env.NODE_ENV === 'production') {
@@ -301,7 +299,7 @@ function errorHandler(err, req, res, next) {
 /**
  * Authentication Middleware with improved error handling
  */
-function createAuthMiddleware(jwtSecret) {
+function createAuthMiddleware(jwtSecret, loadUser = null) {
   return (req, res, next) => {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.replace(/^Bearer\s+/i, '').trim();
@@ -316,6 +314,13 @@ function createAuthMiddleware(jwtSecret) {
       // Additional validation
       if (!decoded.id || !decoded.role) {
         return res.status(401).json({ error: 'Invalid token format' });
+      }
+
+      if (loadUser) {
+        const currentUser = loadUser(decoded.id);
+        if (!currentUser || currentUser.status !== 'ACTIVE' || currentUser.role !== decoded.role) {
+          return res.status(401).json({ error: 'Authentication is no longer valid' });
+        }
       }
       
       req.user = decoded;
@@ -406,7 +411,7 @@ function getCorsOptions(isProduction) {
     : [];
   
   if (isProduction && allowedOrigins.length === 0) {
-    console.warn('[Security Warning] ALLOWED_ORIGINS not set in production. CORS will allow all origins.');
+    throw new Error('ALLOWED_ORIGINS is required in production.');
   }
   
   return {
@@ -422,7 +427,7 @@ function getCorsOptions(isProduction) {
       }
       
       // Production: check whitelist
-      if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      if (allowedOrigins.includes(origin)) {
         callback(null, true);
       } else {
         callback(new Error('CORS policy: Origin not allowed'), false);

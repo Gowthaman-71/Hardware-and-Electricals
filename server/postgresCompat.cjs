@@ -1,5 +1,6 @@
 const { Pool } = require('pg');
 const deasync = require('deasync');
+const { executionAsyncId } = require('node:async_hooks');
 
 function toPostgresSql(sql) {
   let normalized = String(sql || '').trim();
@@ -85,19 +86,20 @@ function createPgCompatDatabase(config) {
     allowExitOnIdle: false,
   });
   
-  let transactionClient = null;
+  const transactionClients = new Map();
 
   // Handle pool errors
   pool.on('error', (err) => {
     console.error('[PostgreSQL] Unexpected pool error:', err);
   });
 
-  const getTarget = () => {
+  const getTarget = (transactionKey) => {
+    const transactionClient = transactionClients.get(transactionKey);
     if (transactionClient) return transactionClient;
     return pool;
   };
 
-  async function executeQuery(rawSql, params = [], mode = 'query') {
+  async function executeQuery(rawSql, params = [], mode = 'query', transactionKey = null) {
     const sql = String(rawSql || '').trim();
     if (!sql) {
       return mode === 'rows' ? [] : { rowCount: 0, rows: [] };
@@ -108,7 +110,7 @@ function createPgCompatDatabase(config) {
       const tableName = tableNameMatch ? tableNameMatch[1].replace(/^["`]|["`]$/g, '') : null;
       if (!tableName) return [];
 
-      const result = await getTarget().query(
+      const result = await getTarget(transactionKey).query(
         `SELECT column_name AS name, ordinal_position AS cid, data_type AS type, CASE WHEN is_nullable = 'NO' THEN 1 ELSE 0 END AS notnull, column_default AS dflt_value, CASE WHEN EXISTS (SELECT 1 FROM information_schema.key_column_usage kcu JOIN information_schema.table_constraints tc ON tc.constraint_name = kcu.constraint_name WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY' AND kcu.column_name = c.column_name) THEN 1 ELSE 0 END AS pk FROM information_schema.columns c WHERE table_name = $1 ORDER BY ordinal_position`,
         [tableName]
       );
@@ -124,7 +126,7 @@ function createPgCompatDatabase(config) {
     }
 
     const normalizedSql = toPostgresSql(sql);
-    const target = getTarget();
+    const target = getTarget(transactionKey);
     
     try {
       const result = await target.query(normalizedSql, params);
@@ -142,62 +144,76 @@ function createPgCompatDatabase(config) {
   return {
     prepare(sql) {
       return {
-        get: (...params) => runAsyncToSync(async () => {
-          const result = await executeQuery(sql, params, 'rows');
+        get: (...params) => {
+          const transactionKey = executionAsyncId();
+          return runAsyncToSync(async () => {
+          const result = await executeQuery(sql, params, 'rows', transactionKey);
           return Array.isArray(result) ? result[0] : (result.rows ? result.rows[0] : undefined);
-        }),
-        all: (...params) => runAsyncToSync(async () => {
-          const result = await executeQuery(sql, params, 'rows');
+          });
+        },
+        all: (...params) => {
+          const transactionKey = executionAsyncId();
+          return runAsyncToSync(async () => {
+          const result = await executeQuery(sql, params, 'rows', transactionKey);
           return Array.isArray(result) ? result : (result.rows || []);
-        }),
-        run: (...params) => runAsyncToSync(async () => {
-          const result = await executeQuery(sql, params, 'run');
+          });
+        },
+        run: (...params) => {
+          const transactionKey = executionAsyncId();
+          return runAsyncToSync(async () => {
+          const result = await executeQuery(sql, params, 'run', transactionKey);
           const rowCount = Number(result.rowCount || 0);
           const lastInsertRowid = result.rows && result.rows[0] && result.rows[0].id != null ? Number(result.rows[0].id) : null;
           return { changes: rowCount, lastInsertRowid };
-        }),
+          });
+        },
       };
     },
-    exec: (sql) => runAsyncToSync(async () => {
+    exec: (sql) => {
+      const transactionKey = executionAsyncId();
+      return runAsyncToSync(async () => {
       const statements = String(sql || '').split(';').map((part) => part.trim()).filter(Boolean);
       for (const statement of statements) {
         const normalized = statement.toUpperCase();
         if (normalized === 'BEGIN' || normalized === 'BEGIN IMMEDIATE' || normalized === 'START TRANSACTION') {
-          if (!transactionClient) {
-            transactionClient = await pool.connect();
+          if (!transactionClients.has(transactionKey)) {
+            transactionClients.set(transactionKey, await pool.connect());
           }
-          await transactionClient.query('BEGIN');
+          await transactionClients.get(transactionKey).query('BEGIN');
           continue;
         }
         if (normalized === 'COMMIT') {
+          const transactionClient = transactionClients.get(transactionKey);
           if (transactionClient) {
             await transactionClient.query('COMMIT');
             transactionClient.release();
-            transactionClient = null;
+            transactionClients.delete(transactionKey);
           }
           continue;
         }
         if (normalized === 'ROLLBACK') {
+          const transactionClient = transactionClients.get(transactionKey);
           if (transactionClient) {
             await transactionClient.query('ROLLBACK');
             transactionClient.release();
-            transactionClient = null;
+            transactionClients.delete(transactionKey);
           }
           continue;
         }
 
-        const result = await executeQuery(statement);
+        const result = await executeQuery(statement, [], 'query', transactionKey);
         if (result && result.command === 'SELECT' && !Array.isArray(result.rows)) {
           continue;
         }
       }
       return { ok: true };
-    }),
+      });
+    },
     close: () => runAsyncToSync(async () => {
-      if (transactionClient) {
+      for (const transactionClient of transactionClients.values()) {
         transactionClient.release();
-        transactionClient = null;
       }
+      transactionClients.clear();
       await pool.end();
     }),
     pool,

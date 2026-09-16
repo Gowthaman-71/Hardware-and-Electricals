@@ -39,5 +39,7 @@ services:
         value: "false"
       - key: DATABASE_URL
         sync: false
+      - key: ALLOWED_ORIGINS
+        value: https://murugesan-electrical-and-hardwares.onrender.com
       - key: UPLOAD_DIR
         value: /tmp/uploads

@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const { createPgCompatDatabase } = require('./postgresCompat.cjs');
 const security = require('./security.cjs');
@@ -210,6 +211,7 @@ const runProductionSchemaSetup = () => {
     `CREATE TABLE IF NOT EXISTS attributes (
       id SERIAL PRIMARY KEY,
       category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
+      product_type_id INTEGER REFERENCES product_types(id) ON DELETE RESTRICT,
       name TEXT NOT NULL,
       type TEXT NOT NULL,
       required BOOLEAN NOT NULL DEFAULT FALSE,
@@ -261,6 +263,7 @@ const runProductionSchemaSetup = () => {
       payment_status TEXT NOT NULL DEFAULT 'PENDING',
       delivery_address_json TEXT NOT NULL,
       notification_status TEXT NOT NULL DEFAULT 'PENDING',
+      stock_restored BOOLEAN NOT NULL DEFAULT FALSE,
       notification_sent_at TIMESTAMPTZ,
       notification_message_id TEXT,
       idempotency_key TEXT,
@@ -304,6 +307,8 @@ const runProductionSchemaSetup = () => {
     `ALTER TABLE order_notifications ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'PENDING'`,
     `ALTER TABLE order_notifications ADD COLUMN IF NOT EXISTS provider_message_id TEXT`,
     `ALTER TABLE order_notifications ADD COLUMN IF NOT EXISTS error_message TEXT`,
+    `ALTER TABLE attributes ADD COLUMN IF NOT EXISTS product_type_id INTEGER REFERENCES product_types(id) ON DELETE RESTRICT`,
+    `ALTER TABLE orders ADD COLUMN IF NOT EXISTS stock_restored BOOLEAN NOT NULL DEFAULT FALSE`,
     `CREATE TABLE IF NOT EXISTS settings (
       id SERIAL PRIMARY KEY,
       key TEXT NOT NULL UNIQUE,
@@ -424,6 +429,7 @@ const normalizeOrderStatus = (value) => {
   const allowed = new Set(['PENDING', 'CONFIRMED', 'REJECTED', 'PROCESSING', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED']);
   return allowed.has(normalized) ? normalized : null;
 };
+const catalogStatuses = new Set(['ACTIVE', 'INACTIVE', 'ARCHIVED']);
 const formatOrderStatusLabel = (value) => {
   const labelMap = {
     PENDING: 'Pending',
@@ -884,6 +890,13 @@ app.use((req, _res, next) => {
   }
   next();
 });
+app.use(security.apiRateLimit);
+app.use((req, _res, next) => {
+  if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method) && /\/api\/(categories|brands|product-types)(\/|$)/.test(req.path)) {
+    staticDataCache.clear();
+  }
+  next();
+});
 app.use('/uploads', express.static(uploadDirectory));
 const upload = multer({ dest: uploadDirectory, limits: { fileSize: 10 * 1024 * 1024 } });
 const mobilePattern = /^[6-9]\d{9}$/;
@@ -893,7 +906,7 @@ const isValidGstNumber = (value) => {
   const normalized = normalizeGstNumber(value);
   return !normalized || gstNumberPattern.test(normalized);
 };
-const auth = security.createAuthMiddleware(jwtSecret);
+const auth = security.createAuthMiddleware(jwtSecret, (userId) => db.prepare('SELECT id, role, status FROM users WHERE id = ?').get(Number(userId)));
 const admin = security.requireAdmin;
 const customer = security.requireCustomer;
 app.get('/api/health', (_req, res) => res.json({ ok: true, database: isProduction ? 'postgresql' : 'sqlite', environment: process.env.NODE_ENV || 'development', productionDatabaseConfigured: Boolean(productionDatabaseUrl) }));
@@ -1202,14 +1215,18 @@ const handleCreateCustomerOrder = async (req, res) => {
     return res.status(400).json({ error: 'Order items are invalid' });
   }
   const timestamp = now();
-  const idempotencyKey = String(body.idempotencyKey || `${req.user.id}:${Date.now()}:${timestamp}`);
-  const existing = db.prepare('SELECT * FROM orders WHERE idempotency_key = ?').get(idempotencyKey);
+  const idempotencyKey = String(body.idempotencyKey || '').trim();
+  if (!idempotencyKey || idempotencyKey.length > 128) {
+    return res.status(400).json({ error: 'A unique checkout idempotency key is required' });
+  }
+  const existing = db.prepare('SELECT * FROM orders WHERE idempotency_key = ? AND customer_id = ?').get(idempotencyKey, req.user.id);
   if (existing) {
     const existingOwnerMsg = buildOwnerOrderNotificationMessage(existing);
     const existingWhatsappUrl = buildWhatsAppUrl(ownerWhatsappNumber, existingOwnerMsg);
     return res.status(200).json({ success: true, order: mapOrder(existing), whatsappUrl: existingWhatsappUrl });
   }
 
+  let transactionCommitted = false;
   db.exec('BEGIN IMMEDIATE');
   try {
     const catalogRows = normalizedItems.map((item) => db.prepare('SELECT * FROM products WHERE id = ? AND status = ?').get(item.productId, 'ACTIVE'));
@@ -1247,7 +1264,7 @@ const handleCreateCustomerOrder = async (req, res) => {
     const deliveryCharge = 0;
     const total = subtotal + deliveryCharge;
     const snapshot = { ...mapAddress(address), gstNumber: gstNumber || mapAddress(address).gstNumber || null };
-    const orderNumber = `MH-${String(Date.now()).slice(-6)}`;
+    const orderNumber = `MH-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
 
     const result = db.prepare('INSERT INTO orders (order_number,customer_id,customer_name,customer_email,customer_phone,gst_number,items_json,subtotal,delivery_charge,total,status,payment_method,payment_status,delivery_address_json,idempotency_key,notification_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(orderNumber, req.user.id, user.name, user.email || `${user.mobile_number}@mobile.local`, address.phone, gstNumber || null, JSON.stringify(snapshotItems), subtotal, deliveryCharge, total, 'PENDING', 'Cash on Delivery', 'PENDING', JSON.stringify(snapshot), idempotencyKey, 'PENDING', timestamp, timestamp);
     const orderId = Number(result.lastInsertRowid);
@@ -1265,23 +1282,35 @@ const handleCreateCustomerOrder = async (req, res) => {
     }
 
     db.exec('COMMIT');
+    transactionCommitted = true;
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
     const ownerMsg = buildOwnerOrderNotificationMessage(order);
-    const ownerNotification = await createOrderNotification({
-      order,
-      type: 'NEW_ORDER_OWNER',
-      recipient: ownerWhatsappNumber,
-      status: 'PENDING',
-    });
+    let ownerNotification;
+    try {
+      ownerNotification = await createOrderNotification({
+        order,
+        type: 'NEW_ORDER_OWNER',
+        recipient: ownerWhatsappNumber,
+        status: 'PENDING',
+      });
+    } catch (notificationError) {
+      console.error('[api/orders] notification preparation failed', notificationError);
+      db.prepare('UPDATE orders SET notification_status = ?, updated_at = ? WHERE id = ?').run('FAILED', now(), orderId);
+      ownerNotification = { notificationId: null, whatsappUrl: '' };
+    }
     if (ownerNotification.notificationId) {
-      db.prepare('UPDATE orders SET notification_status = ? WHERE id = ?').run('NOT_ATTEMPTED', orderId);
+      db.prepare('UPDATE orders SET notification_status = ? WHERE id = ?').run('PREPARED', orderId);
     }
     const whatsappUrl = ownerNotification.whatsappUrl || buildWhatsAppUrl(ownerWhatsappNumber, ownerMsg);
     res.status(201).json({ success: true, order: mapOrder(order), whatsappUrl, notificationId: ownerNotification.notificationId });
   } catch (error) {
-    db.exec('ROLLBACK');
+    if (!transactionCommitted) {
+      try { db.exec('ROLLBACK'); } catch (rollbackError) {
+        console.error('[api/orders] rollback failed', rollbackError);
+      }
+    }
     if (String(error.message).includes('UNIQUE')) {
-      const existingDuplicate = db.prepare('SELECT * FROM orders WHERE idempotency_key = ?').get(idempotencyKey);
+      const existingDuplicate = db.prepare('SELECT * FROM orders WHERE idempotency_key = ? AND customer_id = ?').get(idempotencyKey, req.user.id);
       if (existingDuplicate) {
         const existingOwnerMsg = buildOwnerOrderNotificationMessage(existingDuplicate);
         const existingWhatsappUrl = buildWhatsAppUrl(ownerWhatsappNumber, existingOwnerMsg);
@@ -1314,12 +1343,6 @@ app.patch('/api/notifications/:id/status', auth, (req, res) => {
   }
   
   db.prepare('UPDATE order_notifications SET status = ?, updated_at = ? WHERE id = ?').run(status, now(), notificationId);
-  
-  // Also update order notification_status if this is the primary notification
-  const orderNotification = db.prepare('SELECT * FROM order_notifications WHERE id = ? AND type = ?').get(notificationId, 'NEW_ORDER_OWNER');
-  if (orderNotification) {
-    db.prepare('UPDATE orders SET notification_status = ? WHERE id = ?').run(status, orderNotification.order_id);
-  }
   
   res.json({ success: true, status });
 });
@@ -1465,6 +1488,7 @@ app.post('/api/categories', auth, admin, (req, res) => {
   const slugValue = providedSlug ? slugify(providedSlug) : '';
   if (!name) return res.status(400).json({ error: 'Category name is required' });
   if (!slugValue) return res.status(400).json({ error: 'Category slug is required' });
+  if (!catalogStatuses.has(body.status || 'ACTIVE')) return res.status(400).json({ error: 'Invalid category status' });
   db.exec('BEGIN');
   try {
     const duplicate = db.prepare('SELECT id FROM categories WHERE slug = ? COLLATE NOCASE').get(slugValue);
@@ -1493,6 +1517,7 @@ app.patch('/api/categories/:id', auth, admin, (req, res) => {
   const providedSlug = body.slug == null ? current.slug : String(body.slug || body.name || '').trim();
   const slugValue = providedSlug ? slugify(providedSlug) : current.slug;
   if (!name) return res.status(400).json({ error: 'Category name is required' });
+  if (body.status != null && !catalogStatuses.has(body.status)) return res.status(400).json({ error: 'Invalid category status' });
   db.exec('BEGIN');
   try {
     const duplicate = db.prepare('SELECT id FROM categories WHERE slug = ? COLLATE NOCASE AND id != ?').get(slugValue, id);
@@ -1518,7 +1543,7 @@ app.patch('/api/categories/:id/archive', auth, admin, (req, res) => {
   const id = Number(req.params.id); 
   const reassignToCategoryId = req.body?.reassignToCategoryId ? Number(req.body.reassignToCategoryId) : null;
   
-  const productCount = db.prepare("SELECT COUNT(*) count FROM products WHERE category_id = ? AND status != 'ARCHIVED'").get(id).count; 
+  const productCount = db.prepare('SELECT COUNT(*) count FROM products WHERE category_id = ?').get(id).count;
   
   if (productCount > 0) {
     // If reassignment category provided, move products
@@ -1535,6 +1560,11 @@ app.patch('/api/categories/:id/archive', auth, admin, (req, res) => {
       
       if (targetCategory.id === id) {
         return res.status(400).json({ error: 'Cannot reassign to same category' });
+      }
+
+      const incompatibleTypes = db.prepare('SELECT COUNT(*) count FROM products p WHERE p.category_id = ? AND p.product_type_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM product_types pt WHERE pt.id = p.product_type_id AND pt.category_id = ?)').get(id, reassignToCategoryId).count;
+      if (Number(incompatibleTypes) > 0) {
+        return res.status(409).json({ error: 'Products with category-specific product types must be reassigned to valid product types first' });
       }
       
       db.exec('BEGIN IMMEDIATE');
@@ -1622,8 +1652,8 @@ app.get('/api/brands', (_req, res) => {
   
   res.json(brands);
 });
-app.post('/api/brands', auth, admin, (req, res) => { const body = req.body || {}; const timestamp = now(); try { const result = db.prepare('INSERT INTO brands (name,slug,logo_url,description,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').run(String(body.name).trim(), slugify(body.slug || body.name), body.logoUrl || null, body.description || '', body.status || 'ACTIVE', timestamp, timestamp); res.status(201).json(mapBrand(db.prepare('SELECT * FROM brands WHERE id = ?').get(result.lastInsertRowid))); } catch (error) { res.status(400).json({ error: error.message.includes('UNIQUE') ? 'Brand slug already exists' : 'Unable to create brand' }); } });
-app.patch('/api/brands/:id', auth, admin, (req, res) => { const body = req.body || {}; const timestamp = now(); try { const result = db.prepare('UPDATE brands SET name = COALESCE(?, name), logo_url = COALESCE(?, logo_url), description = COALESCE(?, description), status = COALESCE(?, status), updated_at = ? WHERE id = ?').run(body.name ?? null, body.logoUrl ?? null, body.description ?? null, body.status ?? null, timestamp, Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Brand not found' }); res.json(mapBrand(db.prepare('SELECT * FROM brands WHERE id = ?').get(Number(req.params.id)))); } catch { res.status(400).json({ error: 'Unable to update brand' }); } });
+app.post('/api/brands', auth, admin, (req, res) => { const body = req.body || {}; const timestamp = now(); if (!catalogStatuses.has(body.status || 'ACTIVE')) return res.status(400).json({ error: 'Invalid brand status' }); try { const result = db.prepare('INSERT INTO brands (name,slug,logo_url,description,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').run(String(body.name).trim(), slugify(body.slug || body.name), body.logoUrl || null, body.description || '', body.status || 'ACTIVE', timestamp, timestamp); res.status(201).json(mapBrand(db.prepare('SELECT * FROM brands WHERE id = ?').get(result.lastInsertRowid))); } catch (error) { res.status(400).json({ error: error.message.includes('UNIQUE') ? 'Brand slug already exists' : 'Unable to create brand' }); } });
+app.patch('/api/brands/:id', auth, admin, (req, res) => { const body = req.body || {}; const timestamp = now(); if (body.status != null && !catalogStatuses.has(body.status)) return res.status(400).json({ error: 'Invalid brand status' }); try { const result = db.prepare('UPDATE brands SET name = COALESCE(?, name), logo_url = COALESCE(?, logo_url), description = COALESCE(?, description), status = COALESCE(?, status), updated_at = ? WHERE id = ?').run(body.name ?? null, body.logoUrl ?? null, body.description ?? null, body.status ?? null, timestamp, Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Brand not found' }); res.json(mapBrand(db.prepare('SELECT * FROM brands WHERE id = ?').get(Number(req.params.id)))); } catch { res.status(400).json({ error: 'Unable to update brand' }); } });
 app.patch('/api/brands/:id/archive', auth, admin, (req, res) => { const id = Number(req.params.id); const productCount = db.prepare("SELECT COUNT(*) count FROM products WHERE brand_id = ? AND status != 'ARCHIVED'").get(id).count; if (productCount > 0) { const result = db.prepare("UPDATE brands SET status = 'ARCHIVED', updated_at = ? WHERE id = ?").run(now(), id); if (!result.changes) return res.status(404).json({ error: 'Brand not found' }); return res.json({ archived: true, productCount, message: 'Brand archived and removed from active catalog listings.' }); } const result = db.prepare('DELETE FROM brands WHERE id = ?').run(id); if (!result.changes) return res.status(404).json({ error: 'Brand not found' }); res.json({ deleted: true, message: 'Brand deleted because it has no remaining products.' }); });
 app.patch('/api/brands/:id/restore', auth, admin, (req, res) => { const result = db.prepare("UPDATE brands SET status = 'ACTIVE', updated_at = ? WHERE id = ?").run(now(), Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Brand not found' }); res.json({ restored: true }); });
 app.get('/api/product-types', (req, res) => { 
@@ -1680,6 +1710,9 @@ app.post('/api/product-types', auth, admin, (req, res) => {
   const category = db.prepare('SELECT id, status FROM categories WHERE id = ?').get(categoryId);
   if (!category) {
     return res.status(400).json({ error: 'Category not found' });
+  }
+  if (category.status !== 'ACTIVE') {
+    return res.status(400).json({ error: 'Cannot add product types to an inactive category' });
   }
   
   try { 
@@ -2348,8 +2381,8 @@ app.post('/api/products', auth, admin, (req, res) => {
   if (!category) {
     return res.status(400).json({ error: 'Category not found' });
   }
-  if (category.status === 'ARCHIVED') {
-    return res.status(400).json({ error: 'Cannot add products to archived category' });
+  if (category.status !== 'ACTIVE') {
+    return res.status(400).json({ error: 'Cannot add products to an inactive category' });
   }
   
   const timestamp = now(); 
@@ -2357,6 +2390,12 @@ app.post('/api/products', auth, admin, (req, res) => {
   try { 
     // Handle brand - either by ID or by name lookup
     let brandId = body.brandId ? Number(body.brandId) : null;
+
+    if (brandId) {
+      const brand = db.prepare('SELECT id, status FROM brands WHERE id = ?').get(brandId);
+      if (!brand) return res.status(400).json({ error: 'Brand not found' });
+      if (brand.status !== 'ACTIVE') return res.status(400).json({ error: 'Cannot use an inactive brand' });
+    }
     
     if (!brandId && body.brand && String(body.brand).trim()) {
       const brandName = String(body.brand).trim();
@@ -2504,8 +2543,8 @@ app.patch('/api/products/:id', auth, admin, (req, res) => {
   if (!category) {
     return res.status(400).json({ error: 'Category not found' });
   }
-  if (category.status === 'ARCHIVED') {
-    return res.status(400).json({ error: 'Cannot move products to archived category' });
+  if (category.status !== 'ACTIVE') {
+    return res.status(400).json({ error: 'Cannot move products to an inactive category' });
   }
   
   const timestamp = now(); 
@@ -2513,6 +2552,12 @@ app.patch('/api/products/:id', auth, admin, (req, res) => {
   try { 
     // Handle brand - either by ID or by name lookup
     let brandId = body.brandId !== undefined ? (body.brandId ? Number(body.brandId) : null) : current.brand_id;
+
+    if (brandId) {
+      const brand = db.prepare('SELECT id, status FROM brands WHERE id = ?').get(brandId);
+      if (!brand) return res.status(400).json({ error: 'Brand not found' });
+      if (brand.status !== 'ACTIVE') return res.status(400).json({ error: 'Cannot use an inactive brand' });
+    }
     
     if (body.brand !== undefined && String(body.brand).trim()) {
       const brandName = String(body.brand).trim();
@@ -2539,7 +2584,7 @@ app.patch('/api/products/:id', auth, admin, (req, res) => {
     
     // Validate product type if changing
     let productTypeId = body.productTypeId !== undefined ? (body.productTypeId ? Number(body.productTypeId) : null) : current.product_type_id;
-    if (productTypeId && body.productTypeId !== undefined) {
+    if (productTypeId) {
       const productType = db.prepare('SELECT id, category_id, status FROM product_types WHERE id = ?').get(productTypeId);
       if (!productType) {
         return res.status(400).json({ error: 'Product type not found' });
@@ -2602,6 +2647,14 @@ app.patch('/api/products/:id', auth, admin, (req, res) => {
   } 
 });
 app.patch('/api/products/:id/archive', auth, admin, (req, res) => { const result = db.prepare("UPDATE products SET status = 'ARCHIVED', updated_at = ? WHERE id = ?").run(now(), Number(req.params.id)); if (!result.changes) return res.status(404).json({ error: 'Product not found' }); res.status(204).end(); });
+const detectImageFormat = (filePath) => {
+  const header = fs.readFileSync(filePath).subarray(0, 12);
+  if (header.length >= 3 && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) return 'jpeg';
+  if (header.length >= 8 && header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'png';
+  if (header.length >= 6 && ['GIF87a', 'GIF89a'].includes(header.subarray(0, 6).toString('ascii'))) return 'gif';
+  if (header.length >= 12 && header.subarray(0, 4).toString('ascii') === 'RIFF' && header.subarray(8, 12).toString('ascii') === 'WEBP') return 'webp';
+  return null;
+};
 app.post('/api/images', auth, admin, upload.single('image'), (req, res) => { 
   if (!req.file) return res.status(400).json({ error: 'Image is required' }); 
   
@@ -2618,12 +2671,15 @@ app.post('/api/images', auth, admin, upload.single('image'), (req, res) => {
     try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
     return res.status(400).json({ error: 'Image size must be less than 10MB' });
   }
-  
-  const safeName = path.basename(req.file.originalname || 'upload').replace(/[^a-zA-Z0-9._-]/g, '_'); 
-  const timestamp = Date.now();
-  const extension = path.extname(safeName);
-  const basename = path.basename(safeName, extension);
-  const uniqueName = `${timestamp}-${basename.slice(0, 50)}${extension}`;
+
+  const detectedFormat = detectImageFormat(req.file.path);
+  const expectedFormats = { 'image/jpeg': 'jpeg', 'image/jpg': 'jpeg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
+  if (!detectedFormat || detectedFormat !== expectedFormats[req.file.mimetype]) {
+    try { fs.unlinkSync(req.file.path); } catch { /* ignore */ }
+    return res.status(400).json({ error: 'Uploaded file is not a valid supported image' });
+  }
+
+  const uniqueName = `${Date.now()}-${crypto.randomUUID()}.${detectedFormat}`;
   const safePath = path.join(uploadDirectory, uniqueName); 
   
   try {
